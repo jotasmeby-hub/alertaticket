@@ -18,12 +18,13 @@ jobs:
     timeout-minutes: 4
 
     steps:
+      # Restaurar: busca el cache más reciente con ese prefijo
       - name: 📂 Restaurar estado previo
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: estado_previo.json
-          key: tm-monitor-conciertos-v1
-          restore-keys: tm-monitor-conciertos-v1
+          key: tm-estado-${{ github.run_id }}
+          restore-keys: tm-estado-
 
       - name: 🐍 Configurar Python
         uses: actions/setup-python@v5
@@ -45,13 +46,6 @@ jobs:
           import os, json, asyncio, requests
           from datetime import datetime, timezone, timedelta
 
-          # ══════════════════════════════════════════════════════════════════════
-          #  EVENTOS MONITOREADOS
-          #
-          #  sectores_iniciales = sectores YA disponibles hoy.
-          #  → set() si está totalmente agotado: cualquier sector nuevo = alerta.
-          #  → los nombres no son case-sensitive.
-          # ══════════════════════════════════════════════════════════════════════
           EVENTOS = [
               {
                   "id":     "gorillaz",
@@ -74,7 +68,6 @@ jobs:
                       "accesibilidad universal",
                   },
               },
-              # ── BTS — completamente agotado, cualquier sector que aparezca = alerta
               {
                   "id":     "bts_14oct",
                   "nombre": "BTS 14 Oct 2026 💜",
@@ -150,8 +143,6 @@ jobs:
                       texto  = await page.inner_text("body")
                       lineas = [l.strip() for l in texto.splitlines() if l.strip()]
                       print(f"  Página cargada: {len(lineas)} líneas")
-
-                      # Detectar sectores con precio en el panel
                       for i, linea in enumerate(lineas):
                           ll = linea.lower().replace(" ", "")
                           if "desde$" in ll and any(c.isdigit() for c in linea):
@@ -162,15 +153,12 @@ jobs:
                                           and not nombre.startswith("$")):
                                       sectores.append(nombre)
                                       print(f"  ✅ Sector: '{nombre}'")
-
-                      # Para eventos agotados: confirmar que dice agotado
                       if not sectores:
                           texto_lower = texto.lower()
-                          if any(p in texto_lower for p in ["agotado", "sold out", "no disponible"]):
-                              print("  🔴 Página dice: agotado (sin sectores en panel)")
+                          if any(p in texto_lower for p in ["agotado", "sold out"]):
+                              print("  🔴 Agotado — sin sectores en panel")
                           else:
-                              print("  ⚠️  Sin sectores y sin mensaje de agotado — revisar")
-
+                              print("  ⚠️  Sin sectores y sin mensaje de agotado")
                   except Exception as e:
                       print(f"  ⚠️  Lectura falló: {e}")
                   await browser.close()
@@ -180,9 +168,12 @@ jobs:
               if os.path.exists("estado_previo.json"):
                   try:
                       with open("estado_previo.json") as f:
-                          return json.load(f)
+                          data = json.load(f)
+                          print(f"✅ Estado cargado — eventos con historial: {list(data.keys())}")
+                          return data
                   except Exception:
                       pass
+              print("⚠️  Sin estado previo — primer run global")
               return {}
 
           def guardar_estado(estado: dict):
@@ -209,7 +200,6 @@ jobs:
           print(f"  🎵 {ahora_utc.strftime('%Y-%m-%d %H:%M UTC')} ({hora_scl.strftime('%H:%M')} SCL)")
           if SECTOR_PRUEBA:
               print(f"  🧪 MODO PRUEBA — sector: '{SECTOR_PRUEBA}'")
-          print(f"  Eventos: {len(EVENTOS)}")
           print("=" * 55)
 
           estado_global = cargar_estado()
@@ -233,19 +223,15 @@ jobs:
               primer_check = ev_estado.get("primer_check", ahora_utc.isoformat())
               ultimo_hb    = ev_estado.get("ultimo_heartbeat")
 
+              print(f"  primera_vez={primera_vez} | panel_prev={sorted(panel_prev) or '(vacío)'}")
+
               sectores    = asyncio.run(obtener_sectores(url))
               panel_ahora = set(sectores)
-              carga_ok    = len(panel_ahora) > 0 or not primera_vez
+              checks_ok  += 1
 
-              checks_ok  += 1  # contar el check (página cargó aunque esté agotada)
-
-              # Inyectar sector de prueba si corresponde
               if SECTOR_PRUEBA:
                   panel_ahora.add(SECTOR_PRUEBA)
                   print(f"  🧪 Inyectado: '{SECTOR_PRUEBA}'")
-
-              print(f"  Panel actual: {', '.join(sorted(panel_ahora)) or '(vacío — agotado)'}")
-              print(f"  Panel previo: {', '.join(sorted(panel_prev)) or '(vacío)'}")
 
               sectores_nuevos   = panel_ahora - panel_prev
               sectores_perdidos = panel_prev  - panel_ahora
@@ -254,20 +240,19 @@ jobs:
                   if normalizar(s) not in si_norm
               }
 
-              print(f"  A alertar: {', '.join(sorted(sectores_a_alertar)) or 'ninguno'}")
+              print(f"  Panel ahora: {sorted(panel_ahora) or '(vacío)'}")
+              print(f"  A alertar:   {sorted(sectores_a_alertar) or 'ninguno'}")
 
-              # ── Notificaciones ───────────────────────────────────────────────
               if sectores_a_alertar and not primera_vez:
                   prueba_tag = " <i>(PRUEBA)</i>" if SECTOR_PRUEBA else ""
                   lista = "\n".join(f"  🎟 <b>{s}</b>" for s in sorted(sectores_a_alertar))
-                  msg = (
+                  send_telegram(
                       f"🚨 <b>¡Nueva zona disponible!{prueba_tag}</b>\n"
                       f"<b>{nombre}</b>\n\n"
                       f"{lista}\n\n"
                       f"⚡ Compra AHORA:\n{url}\n\n"
                       f"🕐 {hora_scl.strftime('%H:%M')} Santiago"
                   )
-                  send_telegram(msg)
                   print(f"  🚨 ALERTA enviada.")
 
               elif primera_vez:
@@ -292,7 +277,6 @@ jobs:
                       f"Seguimos monitoreando..."
                   )
 
-              # ── Heartbeat diario ─────────────────────────────────────────────
               if not primera_vez and not SECTOR_PRUEBA and debe_heartbeat(ultimo_hb, ahora_utc):
                   total = checks_ok + checks_err
                   tasa  = int(checks_ok / total * 100) if total else 0
@@ -319,7 +303,6 @@ jobs:
                   print("  📊 Heartbeat enviado.")
                   ultimo_hb = ahora_utc.isoformat()
 
-              # Guardar estado (el sector de prueba NO se persiste)
               panel_a_guardar = set(sectores) if sectores else panel_prev
               estado_nuevo[eid] = {
                   "sectores_panel":   list(panel_a_guardar),
@@ -332,14 +315,14 @@ jobs:
               }
 
           guardar_estado(estado_nuevo)
-          print(f"\n{'='*55}")
-          print(f"  ✅ Listo.")
-          print(f"{'='*55}")
+          print(f"\n{'='*55}\n  ✅ Listo.\n{'='*55}")
           PYEOF
 
+      # Guardar con key dinámica — así siempre crea una entrada nueva
+      # y el próximo run restaura la más reciente con restore-keys
       - name: 💾 Guardar estado
-        uses: actions/cache@v4
+        uses: actions/cache/save@v4
         if: always()
         with:
           path: estado_previo.json
-          key: tm-monitor-conciertos-v1
+          key: tm-estado-${{ github.run_id }}
