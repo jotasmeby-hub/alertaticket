@@ -45,6 +45,13 @@ jobs:
           import os, json, asyncio, requests
           from datetime import datetime, timezone, timedelta
 
+          # ══════════════════════════════════════════════════════════════════════
+          #  EVENTOS MONITOREADOS
+          #
+          #  sectores_iniciales = sectores YA disponibles hoy.
+          #  → set() si está totalmente agotado: cualquier sector nuevo = alerta.
+          #  → los nombres no son case-sensitive.
+          # ══════════════════════════════════════════════════════════════════════
           EVENTOS = [
               {
                   "id":     "gorillaz",
@@ -66,6 +73,25 @@ jobs:
                       "cancha general",
                       "accesibilidad universal",
                   },
+              },
+              # ── BTS — completamente agotado, cualquier sector que aparezca = alerta
+              {
+                  "id":     "bts_14oct",
+                  "nombre": "BTS 14 Oct 2026 💜",
+                  "url":    "https://www.ticketmaster.cl/event/bts-world-tour-arirang-live-2026-scl-venta-general-14-de-octubre",
+                  "sectores_iniciales": set(),
+              },
+              {
+                  "id":     "bts_16oct",
+                  "nombre": "BTS 16 Oct 2026 💜",
+                  "url":    "https://www.ticketmaster.cl/event/bts-world-tour-arirang-live-2026-scl-venta-general-16-de-octubre",
+                  "sectores_iniciales": set(),
+              },
+              {
+                  "id":     "bts_17oct",
+                  "nombre": "BTS 17 Oct 2026 💜",
+                  "url":    "https://www.ticketmaster.cl/event/bts-world-tour-arirang-live-2026-scl-venta-general-17-de-octubre",
+                  "sectores_iniciales": set(),
               },
           ]
 
@@ -124,6 +150,8 @@ jobs:
                       texto  = await page.inner_text("body")
                       lineas = [l.strip() for l in texto.splitlines() if l.strip()]
                       print(f"  Página cargada: {len(lineas)} líneas")
+
+                      # Detectar sectores con precio en el panel
                       for i, linea in enumerate(lineas):
                           ll = linea.lower().replace(" ", "")
                           if "desde$" in ll and any(c.isdigit() for c in linea):
@@ -134,6 +162,15 @@ jobs:
                                           and not nombre.startswith("$")):
                                       sectores.append(nombre)
                                       print(f"  ✅ Sector: '{nombre}'")
+
+                      # Para eventos agotados: confirmar que dice agotado
+                      if not sectores:
+                          texto_lower = texto.lower()
+                          if any(p in texto_lower for p in ["agotado", "sold out", "no disponible"]):
+                              print("  🔴 Página dice: agotado (sin sectores en panel)")
+                          else:
+                              print("  ⚠️  Sin sectores y sin mensaje de agotado — revisar")
+
                   except Exception as e:
                       print(f"  ⚠️  Lectura falló: {e}")
                   await browser.close()
@@ -171,7 +208,8 @@ jobs:
           print("=" * 55)
           print(f"  🎵 {ahora_utc.strftime('%Y-%m-%d %H:%M UTC')} ({hora_scl.strftime('%H:%M')} SCL)")
           if SECTOR_PRUEBA:
-              print(f"  🧪 MODO PRUEBA — sector inyectado: '{SECTOR_PRUEBA}'")
+              print(f"  🧪 MODO PRUEBA — sector: '{SECTOR_PRUEBA}'")
+          print(f"  Eventos: {len(EVENTOS)}")
           print("=" * 55)
 
           estado_global = cargar_estado()
@@ -197,25 +235,20 @@ jobs:
 
               sectores    = asyncio.run(obtener_sectores(url))
               panel_ahora = set(sectores)
-              carga_ok    = len(panel_ahora) > 0
+              carga_ok    = len(panel_ahora) > 0 or not primera_vez
 
-              if carga_ok:
-                  checks_ok += 1
-              else:
-                  checks_err += 1
+              checks_ok  += 1  # contar el check (página cargó aunque esté agotada)
 
-              # ── Inyectar sector de prueba ────────────────────────────────────
-              # Se suma al panel real → la comparación lo verá como "nuevo"
-              # No modifica sectores_iniciales → pasa el filtro → dispara alerta real
+              # Inyectar sector de prueba si corresponde
               if SECTOR_PRUEBA:
                   panel_ahora.add(SECTOR_PRUEBA)
-                  print(f"  🧪 Sector inyectado en panel: '{SECTOR_PRUEBA}'")
+                  print(f"  🧪 Inyectado: '{SECTOR_PRUEBA}'")
 
-              print(f"  Panel actual: {', '.join(sorted(panel_ahora))}")
+              print(f"  Panel actual: {', '.join(sorted(panel_ahora)) or '(vacío — agotado)'}")
               print(f"  Panel previo: {', '.join(sorted(panel_prev)) or '(vacío)'}")
 
-              sectores_nuevos    = panel_ahora - panel_prev
-              sectores_perdidos  = panel_prev  - panel_ahora
+              sectores_nuevos   = panel_ahora - panel_prev
+              sectores_perdidos = panel_prev  - panel_ahora
               sectores_a_alertar = {
                   s for s in sectores_nuevos
                   if normalizar(s) not in si_norm
@@ -238,12 +271,14 @@ jobs:
                   print(f"  🚨 ALERTA enviada.")
 
               elif primera_vez:
-                  panel_str = "\n".join(f"  ✅ {s}" for s in sorted(panel_ahora)) \
-                              or "  ⚠️ No se detectaron sectores"
+                  estado_txt = (
+                      "\n".join(f"  ✅ {s}" for s in sorted(panel_ahora))
+                      if panel_ahora else "  🔴 Agotado — sin sectores disponibles"
+                  )
                   send_telegram(
                       f"👀 <b>Monitoreando: {nombre}</b>\n\n"
-                      f"<b>Disponibles ahora:</b>\n{panel_str}\n\n"
-                      f"Te aviso si aparece cualquier sector nuevo 🔄"
+                      f"<b>Estado actual:</b>\n{estado_txt}\n\n"
+                      f"Te aviso cuando aparezca cualquier sector 🔄"
                   )
                   print("  📨 Mensaje de inicio enviado.")
 
@@ -269,8 +304,10 @@ jobs:
                       tiempo_str = f"{dias}d {hrs%24}h" if dias else f"{hrs}h"
                   except Exception:
                       tiempo_str = "?"
-                  panel_hb = "\n".join(f"  · {s}" for s in sorted(panel_ahora)) \
-                             or "  ⚠️ Panel no cargó"
+                  panel_hb = (
+                      "\n".join(f"  · {s}" for s in sorted(panel_ahora))
+                      if panel_ahora else "  🔴 Agotado"
+                  )
                   send_telegram(
                       f"📊 <b>Resumen diario – {nombre}</b>\n"
                       f"────────────────────────\n"
@@ -282,9 +319,8 @@ jobs:
                   print("  📊 Heartbeat enviado.")
                   ultimo_hb = ahora_utc.isoformat()
 
-              # ── Guardar estado ───────────────────────────────────────────────
-              # En modo prueba: NO guardamos el sector falso en el estado
-              panel_a_guardar = set(sectores) if carga_ok else panel_prev
+              # Guardar estado (el sector de prueba NO se persiste)
+              panel_a_guardar = set(sectores) if sectores else panel_prev
               estado_nuevo[eid] = {
                   "sectores_panel":   list(panel_a_guardar),
                   "primera_vez":      False,
