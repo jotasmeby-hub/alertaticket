@@ -12,9 +12,6 @@ jobs:
     timeout-minutes: 4
 
     steps:
-      - name: 📥 Checkout
-        uses: actions/checkout@v4
-
       - name: 📂 Restaurar estado previo
         uses: actions/cache@v4
         with:
@@ -26,7 +23,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: pip
 
       - name: 📦 Instalar dependencias
         run: |
@@ -37,7 +33,218 @@ jobs:
         env:
           TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python scripts/check_tickets.py
+        run: |
+          python - <<'PYEOF'
+          import os, sys, json, asyncio, hashlib, requests
+          from datetime import datetime
+
+          EVENT_URL  = "https://www.ticketmaster.cl/event/gorillaz-live-2026-scl-venta-general"
+          EVENT_NAME = "Gorillaz Chile 2026"
+
+          ZONAS_OBJETIVO = ["tribuna", "cancha general", "cancha", "piso", "field", "general"]
+          PALABRAS_DISPONIBLE = ["comprar", "buy", "agregar", "add to cart", "seleccionar",
+                                 "disponible", "available", "en venta", "on sale"]
+          PALABRAS_AGOTADA    = ["agotado", "sold out", "no disponible", "unavailable",
+                                 "sin stock", "out of stock"]
+
+          TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
+          TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+
+          def send_telegram(msg):
+              if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+                  print("⚠️  Sin credenciales Telegram")
+                  return False
+              try:
+                  r = requests.post(
+                      f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                      json={"chat_id": TELEGRAM_CHAT_ID, "text": msg,
+                            "parse_mode": "HTML", "disable_web_page_preview": False},
+                      timeout=10)
+                  r.raise_for_status()
+                  print("✅ Telegram OK")
+                  return True
+              except Exception as e:
+                  print(f"❌ Telegram error: {e}")
+                  return False
+
+          def check_requests():
+              resultado = {"zonas": {}, "html_hash": ""}
+              headers = {
+                  "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
+                  "Accept-Language": "es-CL,es;q=0.9",
+              }
+              try:
+                  resp = requests.get(EVENT_URL, headers=headers, timeout=20)
+                  html  = resp.text
+                  lower = html.lower()
+                  resultado["html_hash"] = hashlib.md5(html.encode()).hexdigest()
+                  for zona in ZONAS_OBJETIVO:
+                      if zona in lower:
+                          idx = lower.find(zona)
+                          ctx = lower[max(0,idx-150):idx+300]
+                          agotada    = any(p in ctx for p in PALABRAS_AGOTADA)
+                          disponible = any(p in ctx for p in PALABRAS_DISPONIBLE)
+                          if disponible and not agotada:
+                              resultado["zonas"][zona] = "disponible"
+                          elif agotada:
+                              resultado["zonas"][zona] = "agotada"
+                          else:
+                              resultado["zonas"][zona] = "mencionada"
+              except Exception as e:
+                  print(f"⚠️  requests error: {e}")
+              return resultado
+
+          async def check_playwright():
+              resultado = {"zonas": {}}
+              try:
+                  from playwright.async_api import async_playwright
+              except ImportError:
+                  return resultado
+              async with async_playwright() as pw:
+                  browser = await pw.chromium.launch(
+                      headless=True,
+                      args=["--no-sandbox","--disable-dev-shm-usage"])
+                  ctx = await browser.new_context(
+                      user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
+                      locale="es-CL", timezone_id="America/Santiago")
+                  api_responses = []
+                  async def cap(response):
+                      url = response.url
+                      if any(k in url for k in ["getcrowder","/api/","/tickets","/sections","/availability","/offers"]):
+                          try:
+                              if "json" in response.headers.get("content-type",""):
+                                  api_responses.append(await response.json())
+                          except Exception:
+                              pass
+                  page = await ctx.new_page()
+                  page.on("response", cap)
+                  try:
+                      await page.goto(EVENT_URL, wait_until="networkidle", timeout=25000)
+                  except Exception:
+                      try:
+                          await page.goto(EVENT_URL, wait_until="domcontentloaded", timeout=25000)
+                      except Exception:
+                          pass
+                  await asyncio.sleep(5)
+                  try:
+                      texto = await page.inner_text("body")
+                      lower = texto.lower()
+                      for zona in ZONAS_OBJETIVO:
+                          if zona in lower:
+                              idx = lower.find(zona)
+                              ctx2 = lower[max(0,idx-200):idx+400]
+                              agotada    = any(p in ctx2 for p in PALABRAS_AGOTADA)
+                              disponible = any(p in ctx2 for p in PALABRAS_DISPONIBLE)
+                              if disponible and not agotada:
+                                  resultado["zonas"][zona] = "disponible"
+                              elif agotada:
+                                  resultado["zonas"][zona] = "agotada"
+                              else:
+                                  resultado["zonas"][zona] = "mencionada"
+                  except Exception as e:
+                      print(f"⚠️  inner_text error: {e}")
+                  for api_data in api_responses:
+                      texto_api = json.dumps(api_data, ensure_ascii=False).lower()
+                      for zona in ZONAS_OBJETIVO:
+                          if zona in texto_api:
+                              idx = texto_api.find(zona)
+                              ctx3 = texto_api[max(0,idx-100):idx+200]
+                              if any(p in ctx3 for p in ["true","available","stock","enabled"]):
+                                  if not any(p in ctx3 for p in ["false","agotado","\"0\""]):
+                                      resultado["zonas"][zona] = "disponible_api"
+                  await browser.close()
+              return resultado
+
+          def cargar_estado():
+              if os.path.exists("estado_previo.json"):
+                  try:
+                      with open("estado_previo.json") as f:
+                          return json.load(f)
+                  except Exception:
+                      pass
+              return {"zonas_disponibles": [], "html_hash": "", "primera_vez": True}
+
+          def guardar_estado(estado):
+              with open("estado_previo.json", "w") as f:
+                  json.dump(estado, f, ensure_ascii=False, indent=2)
+
+          # ── MAIN ─────────────────────────────────────────────────────────────
+          print("="*55)
+          print(f"  Check: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}")
+          print("="*55)
+
+          estado_previo      = cargar_estado()
+          primera_vez        = estado_previo.get("primera_vez", True)
+          zonas_prev         = set(estado_previo.get("zonas_disponibles", []))
+          hash_prev          = estado_previo.get("html_hash", "")
+
+          print("\n📡 Check rápido (requests)...")
+          res_req = check_requests()
+          print(f"   Zonas: {res_req['zonas']}")
+          print(f"   Hash:  {res_req['html_hash'][:12]}...")
+
+          print("\n🎭 Check completo (Playwright)...")
+          res_pw = asyncio.run(check_playwright())
+          print(f"   Zonas: {res_pw['zonas']}")
+
+          # Combinar (Playwright tiene prioridad)
+          zonas = {}
+          zonas.update(res_req["zonas"])
+          for k,v in res_pw["zonas"].items():
+              if v in ("disponible","disponible_api"):
+                  zonas[k] = v
+              elif k not in zonas:
+                  zonas[k] = v
+
+          disponibles_ahora = {z for z,s in zonas.items() if s in ("disponible","disponible_api")}
+          zonas_nuevas      = disponibles_ahora - zonas_prev
+          zonas_perdidas    = zonas_prev - disponibles_ahora
+          html_cambio       = res_req["html_hash"] != hash_prev and hash_prev != ""
+
+          print(f"\n✅ Disponibles ahora: {disponibles_ahora or 'ninguna'}")
+          print(f"   Previas:           {zonas_prev or 'ninguna'}")
+          print(f"   Nuevas:            {zonas_nuevas or 'ninguna'}")
+
+          if zonas_nuevas and not primera_vez:
+              zonas_str = ", ".join(z.upper() for z in sorted(zonas_nuevas))
+              msg = (f"🚨🎸 <b>¡GORILLAZ – TICKETS DISPONIBLES!</b>\n\n"
+                     f"📍 Zona(s): <b>{zonas_str}</b>\n\n"
+                     f"⚡ Compra AHORA:\n{EVENT_URL}\n\n"
+                     f"🕐 {datetime.utcnow().strftime('%H:%M UTC')}")
+              send_telegram(msg)
+              print(f"\n🚨 ALERTA: {zonas_nuevas}")
+          elif primera_vez:
+              estado_str = "\n".join(
+                  f"  {'✅' if s in ('disponible','disponible_api') else '❌'} {z.title()}: {s}"
+                  for z,s in zonas.items() if any(o in z for o in ZONAS_OBJETIVO)
+              ) or "  (página cargó pero no se detectaron zonas — normal en SPA)"
+              msg = (f"👀 <b>Monitor activo – {EVENT_NAME}</b>\n\n"
+                     f"Estado actual:\n{estado_str}\n\n"
+                     f"Chequeando cada 5 minutos 24/7 🔄")
+              send_telegram(msg)
+              print("📨 Mensaje de inicio enviado.")
+          elif html_cambio:
+              msg = (f"⚠️ <b>Cambio en la página – {EVENT_NAME}</b>\n\n"
+                     f"El HTML cambió. Revisá manualmente:\n{EVENT_URL}\n\n"
+                     f"🕐 {datetime.utcnow().strftime('%H:%M UTC')}")
+              send_telegram(msg)
+              print("⚠️  Cambio de HTML detectado.")
+          else:
+              print("✅ Sin cambios.")
+
+          if zonas_perdidas and not primera_vez:
+              msg = (f"😞 <b>Se volvieron a agotar – {EVENT_NAME}</b>\n"
+                     f"Zonas: {', '.join(z.upper() for z in zonas_perdidas)}\nSeguimos monitoreando...")
+              send_telegram(msg)
+
+          guardar_estado({
+              "zonas_disponibles": list(disponibles_ahora),
+              "html_hash": res_req["html_hash"],
+              "primera_vez": False,
+              "ultimo_check": datetime.utcnow().isoformat(),
+          })
+          print("\n✅ Estado guardado. Próximo check en ~5 min.")
+          PYEOF
 
       - name: 💾 Guardar estado
         uses: actions/cache@v4
