@@ -4,13 +4,12 @@ on:
   schedule:
     - cron: "*/5 * * * *"
 
-  # Ejecución manual — aquí puedes activar el modo prueba
   workflow_dispatch:
     inputs:
-      modo_prueba:
-        description: "🧪 Modo prueba: envía alerta con sectores actuales para verificar que Telegram funciona"
-        type: boolean
-        default: false
+      sector_prueba:
+        description: "🧪 Sector inventado para probar la alerta (ej: 'Platea VIP'). Déjalo vacío para correr normal."
+        type: string
+        default: ""
 
 jobs:
   check-tickets:
@@ -40,20 +39,12 @@ jobs:
         env:
           TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          MODO_PRUEBA:      ${{ inputs.modo_prueba }}
+          SECTOR_PRUEBA:    ${{ inputs.sector_prueba }}
         run: |
           python - <<'PYEOF'
           import os, json, asyncio, requests
           from datetime import datetime, timezone, timedelta
 
-          # ══════════════════════════════════════════════════════════════════════
-          #  CONFIGURACIÓN DE EVENTOS
-          #  Para agregar un concierto: copia un bloque y ajusta los campos.
-          #
-          #  sectores_iniciales → los que YA están disponibles hoy.
-          #  Si el monitor se reinicia, no alerta por estos.
-          #  En el día a día, cualquier sector NUEVO que aparezca → alerta.
-          # ══════════════════════════════════════════════════════════════════════
           EVENTOS = [
               {
                   "id":     "gorillaz",
@@ -78,16 +69,13 @@ jobs:
               },
           ]
 
-          HEARTBEAT_HORA_UTC = 13   # ~9:00 AM Santiago
+          HEARTBEAT_HORA_UTC = 13
           HEARTBEAT_HORAS    = 24
 
           TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
           TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+          SECTOR_PRUEBA    = os.environ.get("SECTOR_PRUEBA", "").strip()
 
-          # Modo prueba: activa desde el botón "Run workflow" en GitHub Actions
-          MODO_PRUEBA = os.environ.get("MODO_PRUEBA", "false").lower() == "true"
-
-          # ──────────────────────────────────────────────────────────────────────
           def send_telegram(msg: str) -> bool:
               if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
                   print("  ⚠️  Sin credenciales Telegram")
@@ -110,7 +98,6 @@ jobs:
               t = unicodedata.normalize("NFKD", texto.lower())
               return "".join(c for c in t if not unicodedata.combining(c)).strip()
 
-          # ──────────────────────────────────────────────────────────────────────
           async def obtener_sectores(url: str) -> list:
               from playwright.async_api import async_playwright
               sectores = []
@@ -152,7 +139,6 @@ jobs:
                   await browser.close()
               return sectores
 
-          # ──────────────────────────────────────────────────────────────────────
           def cargar_estado() -> dict:
               if os.path.exists("estado_previo.json"):
                   try:
@@ -173,31 +159,20 @@ jobs:
                   dt = datetime.fromisoformat(ultimo_hb)
                   if dt.tzinfo is None:
                       dt = dt.replace(tzinfo=timezone.utc)
-                  horas = (ahora - dt).total_seconds() / 3600
-                  return horas >= HEARTBEAT_HORAS and ahora.hour == HEARTBEAT_HORA_UTC
+                  return (ahora - dt).total_seconds() / 3600 >= HEARTBEAT_HORAS \
+                         and ahora.hour == HEARTBEAT_HORA_UTC
               except Exception:
                   return False
 
-          # ══════════════════════════════════════════════════════════════════════
-          #  MAIN
           # ══════════════════════════════════════════════════════════════════════
           ahora_utc = datetime.now(timezone.utc)
           hora_scl  = ahora_utc - timedelta(hours=4)
 
           print("=" * 55)
-          print(f"  🎵 Monitor — {ahora_utc.strftime('%Y-%m-%d %H:%M UTC')} "
-                f"({hora_scl.strftime('%H:%M')} SCL)")
-          if MODO_PRUEBA:
-              print("  🧪 MODO PRUEBA ACTIVADO")
-          print(f"  Eventos: {len(EVENTOS)}")
+          print(f"  🎵 {ahora_utc.strftime('%Y-%m-%d %H:%M UTC')} ({hora_scl.strftime('%H:%M')} SCL)")
+          if SECTOR_PRUEBA:
+              print(f"  🧪 MODO PRUEBA — sector inyectado: '{SECTOR_PRUEBA}'")
           print("=" * 55)
-
-          if MODO_PRUEBA:
-              send_telegram(
-                  "🧪 <b>Modo prueba iniciado</b>\n\n"
-                  "Cargando páginas y enviando alerta de prueba para cada evento...\n"
-                  "Si recibes los mensajes siguientes, el monitor funciona correctamente ✅"
-              )
 
           estado_global = cargar_estado()
           estado_nuevo  = {}
@@ -220,8 +195,7 @@ jobs:
               primer_check = ev_estado.get("primer_check", ahora_utc.isoformat())
               ultimo_hb    = ev_estado.get("ultimo_heartbeat")
 
-              # Cargar panel actual
-              sectores   = asyncio.run(obtener_sectores(url))
+              sectores    = asyncio.run(obtener_sectores(url))
               panel_ahora = set(sectores)
               carga_ok    = len(panel_ahora) > 0
 
@@ -229,93 +203,75 @@ jobs:
                   checks_ok += 1
               else:
                   checks_err += 1
-                  print("  ⚠️  Panel vacío — posible error de carga")
 
-              print(f"\n  Panel actual: {', '.join(sorted(panel_ahora)) or '(vacío)'}")
+              # ── Inyectar sector de prueba ────────────────────────────────────
+              # Se suma al panel real → la comparación lo verá como "nuevo"
+              # No modifica sectores_iniciales → pasa el filtro → dispara alerta real
+              if SECTOR_PRUEBA:
+                  panel_ahora.add(SECTOR_PRUEBA)
+                  print(f"  🧪 Sector inyectado en panel: '{SECTOR_PRUEBA}'")
 
-              # ── MODO PRUEBA: alerta con sectores actuales ────────────────────
-              if MODO_PRUEBA:
-                  panel_str = "\n".join(f"  🎟 {s}" for s in sorted(panel_ahora)) \
-                              or "  ⚠️ No se detectaron sectores"
-                  msg = (
-                      f"🧪 <b>Prueba – {nombre}</b>\n\n"
-                      f"<b>Sectores detectados en panel:</b>\n{panel_str}\n\n"
-                      f"✅ Telegram funciona correctamente\n"
-                      f"✅ Playwright cargó la página\n"
-                      f"✅ Se detectaron {len(panel_ahora)} sector(es)\n\n"
-                      f"<i>Este mensaje es solo una prueba, no indica disponibilidad nueva.</i>"
-                  )
-                  send_telegram(msg)
-                  print("  🧪 Mensaje de prueba enviado.")
-                  # En modo prueba no modificamos el estado guardado
-                  estado_nuevo[eid] = ev_estado
-                  continue
+              print(f"  Panel actual: {', '.join(sorted(panel_ahora))}")
+              print(f"  Panel previo: {', '.join(sorted(panel_prev)) or '(vacío)'}")
 
-              # ── Detección normal de cambios ──────────────────────────────────
-              sectores_nuevos   = panel_ahora - panel_prev
-              sectores_perdidos = panel_prev  - panel_ahora
-
-              # Solo alertar por sectores que no estaban desde el inicio
+              sectores_nuevos    = panel_ahora - panel_prev
+              sectores_perdidos  = panel_prev  - panel_ahora
               sectores_a_alertar = {
                   s for s in sectores_nuevos
                   if normalizar(s) not in si_norm
               }
 
-              print(f"  Nuevos a alertar: {', '.join(sorted(sectores_a_alertar)) or 'ninguno'}")
+              print(f"  A alertar: {', '.join(sorted(sectores_a_alertar)) or 'ninguno'}")
 
               # ── Notificaciones ───────────────────────────────────────────────
               if sectores_a_alertar and not primera_vez:
+                  prueba_tag = " <i>(PRUEBA)</i>" if SECTOR_PRUEBA else ""
                   lista = "\n".join(f"  🎟 <b>{s}</b>" for s in sorted(sectores_a_alertar))
                   msg = (
-                      f"🚨 <b>¡Nueva zona disponible!</b>\n"
+                      f"🚨 <b>¡Nueva zona disponible!{prueba_tag}</b>\n"
                       f"<b>{nombre}</b>\n\n"
                       f"{lista}\n\n"
                       f"⚡ Compra AHORA:\n{url}\n\n"
                       f"🕐 {hora_scl.strftime('%H:%M')} Santiago"
                   )
                   send_telegram(msg)
-                  print(f"  🚨 ALERTA: {sectores_a_alertar}")
+                  print(f"  🚨 ALERTA enviada.")
 
               elif primera_vez:
                   panel_str = "\n".join(f"  ✅ {s}" for s in sorted(panel_ahora)) \
                               or "  ⚠️ No se detectaron sectores"
-                  msg = (
+                  send_telegram(
                       f"👀 <b>Monitoreando: {nombre}</b>\n\n"
                       f"<b>Disponibles ahora:</b>\n{panel_str}\n\n"
                       f"Te aviso si aparece cualquier sector nuevo 🔄"
                   )
-                  send_telegram(msg)
                   print("  📨 Mensaje de inicio enviado.")
 
               else:
                   print("  ✅ Sin cambios.")
 
               if sectores_perdidos and not primera_vez:
-                  msg = (
+                  send_telegram(
                       f"😞 <b>Sector se agotó – {nombre}</b>\n"
                       f"Ya no disponible: {', '.join(sorted(sectores_perdidos))}\n"
                       f"Seguimos monitoreando..."
                   )
-                  send_telegram(msg)
 
               # ── Heartbeat diario ─────────────────────────────────────────────
-              if not primera_vez and debe_heartbeat(ultimo_hb, ahora_utc):
+              if not primera_vez and not SECTOR_PRUEBA and debe_heartbeat(ultimo_hb, ahora_utc):
+                  total = checks_ok + checks_err
+                  tasa  = int(checks_ok / total * 100) if total else 0
+                  icon  = "✅" if tasa >= 90 else ("⚠️" if tasa >= 70 else "❌")
                   try:
-                      dt0 = datetime.fromisoformat(primer_check)
-                      if dt0.tzinfo is None: dt0 = dt0.replace(tzinfo=timezone.utc)
+                      dt0 = datetime.fromisoformat(primer_check).replace(tzinfo=timezone.utc)
                       dias = (ahora_utc - dt0).days
                       hrs  = int((ahora_utc - dt0).total_seconds() / 3600)
                       tiempo_str = f"{dias}d {hrs%24}h" if dias else f"{hrs}h"
                   except Exception:
                       tiempo_str = "?"
-
-                  total = checks_ok + checks_err
-                  tasa  = int(checks_ok / total * 100) if total else 0
-                  icon  = "✅" if tasa >= 90 else ("⚠️" if tasa >= 70 else "❌")
                   panel_hb = "\n".join(f"  · {s}" for s in sorted(panel_ahora)) \
                              or "  ⚠️ Panel no cargó"
-
-                  msg = (
+                  send_telegram(
                       f"📊 <b>Resumen diario – {nombre}</b>\n"
                       f"────────────────────────\n"
                       f"{icon} {'OK' if tasa>=90 else 'Con errores' if tasa>=70 else 'Revisar'}\n"
@@ -323,13 +279,14 @@ jobs:
                       f"<b>Sectores disponibles:</b>\n{panel_hb}\n\n"
                       f"<i>Próximo resumen mañana ~9:00 AM 🇨🇱</i>"
                   )
-                  send_telegram(msg)
                   print("  📊 Heartbeat enviado.")
                   ultimo_hb = ahora_utc.isoformat()
 
-              # Guardar estado (sin modificar si panel vacío)
+              # ── Guardar estado ───────────────────────────────────────────────
+              # En modo prueba: NO guardamos el sector falso en el estado
+              panel_a_guardar = set(sectores) if carga_ok else panel_prev
               estado_nuevo[eid] = {
-                  "sectores_panel":   list(panel_ahora) if carga_ok else list(panel_prev),
+                  "sectores_panel":   list(panel_a_guardar),
                   "primera_vez":      False,
                   "checks_ok":        checks_ok,
                   "checks_err":       checks_err,
@@ -340,7 +297,7 @@ jobs:
 
           guardar_estado(estado_nuevo)
           print(f"\n{'='*55}")
-          print(f"  ✅ Listo. {'(Modo prueba)' if MODO_PRUEBA else 'Próximo check en ~5 min.'}")
+          print(f"  ✅ Listo.")
           print(f"{'='*55}")
           PYEOF
 
