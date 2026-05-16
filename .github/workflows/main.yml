@@ -1,4 +1,4 @@
-name: 🎸 Gorillaz Ticket Monitor
+name: 🎵 Monitor de Conciertos
 
 on:
   schedule:
@@ -16,8 +16,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: estado_previo.json
-          key: tm-estado-gorillaz-v2
-          restore-keys: tm-estado-gorillaz-v2
+          key: tm-monitor-conciertos-v1
+          restore-keys: tm-monitor-conciertos-v1
 
       - name: 🐍 Configurar Python
         uses: actions/setup-python@v5
@@ -35,24 +35,51 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           python - <<'PYEOF'
-          import os, sys, json, asyncio, requests
-          from datetime import datetime
+          import os, json, asyncio, requests
+          from datetime import datetime, timezone, timedelta
 
-          EVENT_URL  = "https://www.ticketmaster.cl/event/gorillaz-live-2026-scl-venta-general"
-          EVENT_NAME = "Gorillaz Chile 2026 🎸"
-
-          # Zonas AGOTADAS que queremos vigilar.
-          # Alerta cuando APAREZCAN en el panel derecho con precio.
-          ZONAS_OBJETIVO = [
-              "cancha general",
-              "tribuna central",
-              "tribuna",
+          # ══════════════════════════════════════════════════════════════════════
+          #  CONFIGURACIÓN DE EVENTOS
+          #  Para agregar un concierto nuevo: copia un bloque y ajusta los campos.
+          #
+          #  sectores_iniciales: los sectores que YA están disponibles hoy.
+          #  Cualquier sector NUEVO que aparezca (no esté en esta lista) → ALERTA.
+          #  No importa el nombre exacto: si hay 1 sector nuevo en el panel → avisa.
+          # ══════════════════════════════════════════════════════════════════════
+          EVENTOS = [
+              {
+                  "id":     "gorillaz",
+                  "nombre": "Gorillaz Chile 2026 🎸",
+                  "url":    "https://www.ticketmaster.cl/event/gorillaz-live-2026-scl-venta-general",
+                  # Sectores disponibles HOY — cualquier otro que aparezca → alerta
+                  "sectores_iniciales": {
+            
+                      "pacifico sur",
+                      "pacífico sur",
+                      "cancha frontal",
+                  },
+              },
+              {
+                  "id":     "robbie",
+                  "nombre": "Robbie Williams 2026 🎤",
+                  "url":    "https://www.ticketmaster.cl/event/robbie-williams-2026-venta-general",
+                  # Sectores disponibles HOY
+                  "sectores_iniciales": {
+                      "cancha frontal",
+                      "cancha general",
+                      "accesibilidad universal",
+                  },
+              },
           ]
+
+          HEARTBEAT_HORA_UTC = 13   # ~9:00 AM Santiago
+          HEARTBEAT_HORAS    = 24
 
           TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
           TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
-          def send_telegram(msg):
+          # ──────────────────────────────────────────────────────────────────────
+          def send_telegram(msg: str) -> bool:
               if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
                   print("⚠️  Sin credenciales Telegram")
                   return False
@@ -63,189 +90,235 @@ jobs:
                             "parse_mode": "HTML", "disable_web_page_preview": False},
                       timeout=10)
                   r.raise_for_status()
-                  print("✅ Telegram OK")
+                  print("  ✅ Telegram OK")
                   return True
               except Exception as e:
-                  print(f"❌ Telegram error: {e}")
+                  print(f"  ❌ Telegram error: {e}")
                   return False
 
-          async def obtener_sectores_disponibles():
+          # ──────────────────────────────────────────────────────────────────────
+          def normalizar(texto: str) -> str:
+              import unicodedata
+              t = unicodedata.normalize("NFKD", texto.lower())
+              return "".join(c for c in t if not unicodedata.combining(c)).strip()
+
+          # ──────────────────────────────────────────────────────────────────────
+          async def obtener_sectores(url: str) -> list[str]:
               """
-              Abre la página y lee el panel 'Seleccionar sector'.
-              Solo los sectores que aparecen AHÍ con precio están disponibles.
-              Los grises (agotados) simplemente no aparecen en ese panel.
+              Carga la página y retorna los sectores que aparecen en el panel
+              'Seleccionar sector' con precio visible.
+              La lógica detecta líneas de precio (Desde $...) y toma el nombre
+              de la línea anterior — sin importar cómo se llame el sector.
               """
               from playwright.async_api import async_playwright
-
-              sectores_con_precio = []
-
+              sectores = []
               async with async_playwright() as pw:
                   browser = await pw.chromium.launch(
                       headless=True,
                       args=["--no-sandbox", "--disable-dev-shm-usage"])
-
                   ctx = await browser.new_context(
-                      user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                                 "Chrome/124.0.0.0 Safari/537.36",
+                      user_agent=(
+                          "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                          "Chrome/124.0.0.0 Safari/537.36"),
                       locale="es-CL",
                       timezone_id="America/Santiago",
                       viewport={"width": 1440, "height": 900})
-
                   page = await ctx.new_page()
-
                   try:
-                      await page.goto(EVENT_URL, wait_until="networkidle", timeout=28000)
+                      await page.goto(url, wait_until="networkidle", timeout=28000)
                   except Exception:
                       try:
-                          await page.goto(EVENT_URL, wait_until="domcontentloaded", timeout=28000)
+                          await page.goto(url, wait_until="domcontentloaded", timeout=28000)
                       except Exception as e:
-                          print(f"⚠️  Goto falló: {e}")
-
-                  # Esperar que el JS cargue el panel de sectores
+                          print(f"  ⚠️  Goto falló: {e}")
                   await asyncio.sleep(7)
-
-                  # Leer el texto de la página línea por línea
-                  # El panel tiene formato:
-                  #   NombreSector
-                  #   Desde $ 150.000 + $ 22.500
-                  #   Numerado / Sin numerar
                   try:
-                      texto = await page.inner_text("body")
+                      texto  = await page.inner_text("body")
                       lineas = [l.strip() for l in texto.splitlines() if l.strip()]
-
-                      print(f"   Texto cargado: {len(lineas)} líneas")
-
+                      print(f"  Página cargada: {len(lineas)} líneas")
                       for i, linea in enumerate(lineas):
-                          linea_lower = linea.lower()
-                          # Detectar línea de precio
-                          if ("desde $" in linea_lower or "desde$" in linea_lower.replace(" ", "")) \
-                              and any(c.isdigit() for c in linea):
-                              # La línea anterior es el nombre del sector
+                          ll = linea.lower().replace(" ", "")
+                          # Detectar línea con precio
+                          if "desde$" in ll and any(c.isdigit() for c in linea):
                               if i > 0:
                                   nombre = lineas[i - 1].strip()
-                                  # Filtrar líneas que no son nombres de sector
-                                  if (len(nombre) > 2 and len(nombre) < 60
-                                          and not nombre.startswith("$")
-                                          and not nombre.lower().startswith("desde")):
-                                      sectores_con_precio.append(nombre)
-                                      print(f"   ✅ Panel sector: '{nombre}' | precio: {linea[:40]}")
-
+                                  if (2 < len(nombre) < 70
+                                          and not nombre.lower().startswith("desde")
+                                          and not nombre.startswith("$")):
+                                      sectores.append(nombre)
+                                      print(f"  ✅ Sector en panel: '{nombre}'")
                   except Exception as e:
-                      print(f"⚠️  Lectura texto falló: {e}")
-
+                      print(f"  ⚠️  Lectura falló: {e}")
                   await browser.close()
+              return sectores
 
-              return sectores_con_precio
-
-          def normalizar(texto: str) -> str:
-              import unicodedata
-              t = unicodedata.normalize('NFKD', texto.lower())
-              return ''.join(c for c in t if not unicodedata.combining(c)).strip()
-
-          def zona_en_panel(zona_objetivo: str, sectores_panel: list) -> bool:
-              """True si la zona objetivo aparece en el panel (= está disponible)."""
-              zn = normalizar(zona_objetivo)
-              for s in sectores_panel:
-                  sn = normalizar(s)
-                  if zn in sn or sn in zn:
-                      return True
-              return False
-
-          def cargar_estado():
+          # ──────────────────────────────────────────────────────────────────────
+          def cargar_estado() -> dict:
               if os.path.exists("estado_previo.json"):
                   try:
                       with open("estado_previo.json") as f:
                           return json.load(f)
                   except Exception:
                       pass
-              return {"zonas_disponibles": [], "sectores_panel": [], "primera_vez": True}
+              return {}
 
-          def guardar_estado(e):
+          def guardar_estado(estado: dict):
               with open("estado_previo.json", "w") as f:
-                  json.dump(e, f, ensure_ascii=False, indent=2)
+                  json.dump(estado, f, ensure_ascii=False, indent=2)
 
-          # ── MAIN ─────────────────────────────────────────────────────────────
+          def debe_heartbeat(ultimo_hb: str | None, ahora: datetime) -> bool:
+              if not ultimo_hb:
+                  return ahora.hour == HEARTBEAT_HORA_UTC
+              try:
+                  dt = datetime.fromisoformat(ultimo_hb)
+                  if dt.tzinfo is None:
+                      dt = dt.replace(tzinfo=timezone.utc)
+                  horas = (ahora - dt).total_seconds() / 3600
+                  return horas >= HEARTBEAT_HORAS and ahora.hour == HEARTBEAT_HORA_UTC
+              except Exception:
+                  return False
+
+          # ══════════════════════════════════════════════════════════════════════
+          #  MAIN
+          # ══════════════════════════════════════════════════════════════════════
+          ahora_utc = datetime.now(timezone.utc)
+          hora_scl  = ahora_utc - timedelta(hours=4)
+
           print("=" * 55)
-          print(f"  🎸 Check: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}")
+          print(f"  🎵 Monitor — {ahora_utc.strftime('%Y-%m-%d %H:%M UTC')} "
+                f"({hora_scl.strftime('%H:%M')} SCL)")
+          print(f"  Eventos monitoreados: {len(EVENTOS)}")
           print("=" * 55)
 
-          estado_previo = cargar_estado()
-          primera_vez   = estado_previo.get("primera_vez", True)
-          zonas_prev    = set(estado_previo.get("zonas_disponibles", []))
-          panel_prev    = set(estado_previo.get("sectores_panel", []))
+          estado_global = cargar_estado()
+          estado_nuevo  = {}
 
-          print("\n🎭 Cargando página con Playwright...")
-          sectores_panel = asyncio.run(obtener_sectores_disponibles())
+          for evento in EVENTOS:
+              eid    = evento["id"]
+              nombre = evento["nombre"]
+              url    = evento["url"]
+              si_norm = {normalizar(s) for s in evento["sectores_iniciales"]}
 
-          print(f"\n📋 Sectores en panel de compra ({len(sectores_panel)}):")
-          for s in sectores_panel:
-              print(f"   · {s}")
-          if not sectores_panel:
-              print("   ⚠️  Panel vacío (posible error de carga)")
+              print(f"\n{'─'*55}")
+              print(f"  🎤 {nombre}")
+              print(f"  {url}")
+              print(f"{'─'*55}")
 
-          # Qué zonas objetivo están disponibles ahora
-          disponibles_ahora = set()
-          for zona in ZONAS_OBJETIVO:
-              if zona_en_panel(zona, sectores_panel):
-                  disponibles_ahora.add(zona)
+              ev_estado   = estado_global.get(eid, {})
+              primera_vez = ev_estado.get("primera_vez", True)
+              panel_prev  = set(ev_estado.get("sectores_panel", []))
+              checks_ok   = ev_estado.get("checks_ok", 0)
+              checks_err  = ev_estado.get("checks_err", 0)
+              primer_check= ev_estado.get("primer_check", ahora_utc.isoformat())
+              ultimo_hb   = ev_estado.get("ultimo_heartbeat")
 
-          zonas_nuevas   = disponibles_ahora - zonas_prev
-          zonas_perdidas = zonas_prev - disponibles_ahora
-          panel_cambio   = set(normalizar(s) for s in sectores_panel) != \
-                           set(normalizar(s) for s in panel_prev) and panel_prev
+              # Obtener panel actual
+              sectores = asyncio.run(obtener_sectores(url))
+              panel_ahora = set(sectores)
+              carga_ok    = len(panel_ahora) > 0
 
-          print(f"\n   Disponibles ahora: {disponibles_ahora or 'ninguna (correcto)'}")
-          print(f"   Previas:           {zonas_prev or 'ninguna'}")
-          print(f"   Nuevas:            {zonas_nuevas or 'ninguna'}")
+              if carga_ok:
+                  checks_ok += 1
+              else:
+                  checks_err += 1
 
-          # ── NOTIFICACIONES ────────────────────────────────────────────────────
-          if zonas_nuevas and not primera_vez:
-              zonas_str = ", ".join(z.upper() for z in sorted(zonas_nuevas))
-              msg = (f"🚨🎸 <b>¡GORILLAZ – TICKETS DISPONIBLES!</b>\n\n"
-                     f"📍 Zona(s) habilitadas: <b>{zonas_str}</b>\n\n"
-                     f"⚡ Compra AHORA:\n{EVENT_URL}\n\n"
-                     f"🕐 {datetime.utcnow().strftime('%H:%M UTC')}")
-              send_telegram(msg)
-              print(f"\n🚨 ALERTA ENVIADA: {zonas_nuevas}")
+              # ── Detectar cambios ─────────────────────────────────────────────
+              # Sectores nuevos = aparecen en panel ahora y antes no estaban
+              sectores_nuevos   = panel_ahora - panel_prev
+              sectores_perdidos = panel_prev  - panel_ahora
 
-          elif primera_vez:
-              panel_str = "\n".join(f"  ✅ {s}" for s in sectores_panel) \
-                          or "  (no se detectaron sectores)"
-              objetivo_str = "\n".join(
-                  f"  {'🟢' if z in disponibles_ahora else '🔴'} {z.title()}"
-                  for z in ZONAS_OBJETIVO)
-              msg = (f"👀 <b>Monitor activo – {EVENT_NAME}</b>\n\n"
-                     f"<b>Disponibles ahora en panel:</b>\n{panel_str}\n\n"
-                     f"<b>Vigilando (agotadas):</b>\n{objetivo_str}\n\n"
-                     f"Te aviso cuando alguna aparezca 🔄")
-              send_telegram(msg)
-              print("📨 Mensaje de inicio enviado.")
+              # Filtrar los que ya estaban disponibles desde el inicio del monitor
+              # (para no alertar en el primer run ni por sectores conocidos)
+              sectores_a_alertar = {
+                  s for s in sectores_nuevos
+                  if normalizar(s) not in si_norm
+              }
 
-          elif panel_cambio and not zonas_nuevas:
-              sectores_str = ", ".join(sectores_panel[:6])
-              msg = (f"⚠️ <b>El panel cambió – {EVENT_NAME}</b>\n\n"
-                     f"Sectores ahora: {sectores_str}\n"
-                     f"Tus zonas aún no aparecen. Seguimos monitoreando.\n"
-                     f"👉 {EVENT_URL}")
-              send_telegram(msg)
-              print("⚠️  Cambio en panel, aviso enviado.")
+              print(f"\n  Sectores en panel ahora ({len(panel_ahora)}): "
+                    f"{', '.join(sorted(panel_ahora)) or '(ninguno)'}")
+              print(f"  Nuevos para alertar:    "
+                    f"{', '.join(sorted(sectores_a_alertar)) or 'ninguno'}")
 
-          else:
-              print("✅ Sin cambios. Todo normal.")
+              # ── Notificaciones de cambio ─────────────────────────────────────
+              if sectores_a_alertar and not primera_vez:
+                  lista = "\n".join(f"  🎟 <b>{s}</b>" for s in sorted(sectores_a_alertar))
+                  msg = (
+                      f"🚨 <b>¡Nueva zona disponible!</b>\n"
+                      f"<b>{nombre}</b>\n\n"
+                      f"{lista}\n\n"
+                      f"⚡ Compra AHORA:\n{url}\n\n"
+                      f"🕐 {hora_scl.strftime('%H:%M')} Santiago"
+                  )
+                  send_telegram(msg)
+                  print(f"\n  🚨 ALERTA enviada: {sectores_a_alertar}")
 
-          if zonas_perdidas and not primera_vez:
-              msg = (f"😞 <b>Volvieron a agotarse – {EVENT_NAME}</b>\n"
-                     f"Zonas: {', '.join(z.upper() for z in zonas_perdidas)}\n"
-                     f"Seguimos monitoreando...")
-              send_telegram(msg)
+              elif primera_vez:
+                  panel_str = "\n".join(f"  ✅ {s}" for s in sorted(panel_ahora)) \
+                              or "  ⚠️ No se detectaron sectores"
+                  msg = (
+                      f"👀 <b>Monitoreando: {nombre}</b>\n\n"
+                      f"<b>Disponibles ahora:</b>\n{panel_str}\n\n"
+                      f"Te aviso si aparece <b>cualquier sector nuevo</b> 🔄"
+                  )
+                  send_telegram(msg)
+                  print("  📨 Mensaje de inicio enviado.")
 
-          guardar_estado({
-              "zonas_disponibles": list(disponibles_ahora),
-              "sectores_panel": sectores_panel,
-              "primera_vez": False,
-              "ultimo_check": datetime.utcnow().isoformat(),
-          })
-          print("\n✅ Listo. Próximo check en ~5 min.")
+              else:
+                  print("  ✅ Sin cambios.")
+
+              if sectores_perdidos and not primera_vez:
+                  msg = (
+                      f"😞 <b>Sector se agotó – {nombre}</b>\n"
+                      f"Ya no disponible: {', '.join(sorted(sectores_perdidos))}\n"
+                      f"Seguimos monitoreando..."
+                  )
+                  send_telegram(msg)
+
+              # ── Heartbeat diario ─────────────────────────────────────────────
+              if not primera_vez and debe_heartbeat(ultimo_hb, ahora_utc):
+                  try:
+                      dt0 = datetime.fromisoformat(primer_check)
+                      if dt0.tzinfo is None: dt0 = dt0.replace(tzinfo=timezone.utc)
+                      dias = (ahora_utc - dt0).days
+                      hrs  = int((ahora_utc - dt0).total_seconds() / 3600)
+                      tiempo_str = f"{dias}d {hrs%24}h" if dias else f"{hrs}h"
+                  except Exception:
+                      tiempo_str = "?"
+
+                  total = checks_ok + checks_err
+                  tasa  = int(checks_ok / total * 100) if total else 0
+                  icon  = "✅" if tasa >= 90 else ("⚠️" if tasa >= 70 else "❌")
+                  panel_hb = "\n".join(f"  · {s}" for s in sorted(panel_ahora)) \
+                             or "  ⚠️ Panel no cargó"
+
+                  msg = (
+                      f"📊 <b>Resumen diario</b>\n"
+                      f"<b>{nombre}</b>\n"
+                      f"────────────────────────\n"
+                      f"{icon} Estado: {'OK' if tasa>=90 else 'Con errores' if tasa>=70 else 'Revisar'}\n"
+                      f"⏱ Activo: {tiempo_str} | Checks: {total} ({tasa}% OK)\n\n"
+                      f"<b>Sectores disponibles:</b>\n{panel_hb}\n\n"
+                      f"<i>Próximo resumen mañana ~9:00 AM 🇨🇱</i>"
+                  )
+                  send_telegram(msg)
+                  print("  📊 Heartbeat enviado.")
+                  ultimo_hb = ahora_utc.isoformat()
+
+              # ── Guardar estado de este evento ────────────────────────────────
+              estado_nuevo[eid] = {
+                  "sectores_panel":   list(panel_ahora) if carga_ok else list(panel_prev),
+                  "primera_vez":      False,
+                  "checks_ok":        checks_ok,
+                  "checks_err":       checks_err,
+                  "ultimo_heartbeat": ultimo_hb,
+                  "primer_check":     primer_check,
+                  "ultimo_check":     ahora_utc.isoformat(),
+              }
+
+          guardar_estado(estado_nuevo)
+          print(f"\n{'='*55}")
+          print(f"  ✅ Listo. Próximo check en ~5 min.")
+          print(f"{'='*55}")
           PYEOF
 
       - name: 💾 Guardar estado
@@ -253,4 +326,4 @@ jobs:
         if: always()
         with:
           path: estado_previo.json
-          key: tm-estado-gorillaz-v2
+          key: tm-monitor-conciertos-v1
