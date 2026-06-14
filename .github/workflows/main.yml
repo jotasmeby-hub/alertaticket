@@ -18,7 +18,6 @@ jobs:
     timeout-minutes: 4
 
     steps:
-      # Restaurar: busca el cache más reciente con ese prefijo
       - name: 📂 Restaurar estado previo
         uses: actions/cache/restore@v4
         with:
@@ -68,28 +67,7 @@ jobs:
                       "accesibilidad universal",
                   },
               },
-              {
-                  "id":     "bts_14oct",
-                  "nombre": "BTS 14 Oct 2026 💜",
-                  "url":    "https://www.ticketmaster.cl/event/bts-world-tour-arirang-live-2026-scl-venta-general-14-de-octubre",
-                  "sectores_iniciales": set(),
-              },
-              {
-                  "id":     "bts_16oct",
-                  "nombre": "BTS 16 Oct 2026 💜",
-                  "url":    "https://www.ticketmaster.cl/event/bts-world-tour-arirang-live-2026-scl-venta-general-16-de-octubre",
-                  "sectores_iniciales": set(),
-              },
-              {
-                  "id":     "bts_17oct",
-                  "nombre": "BTS 17 Oct 2026 💜",
-                  "url":    "https://www.ticketmaster.cl/event/bts-world-tour-arirang-live-2026-scl-venta-general-17-de-octubre",
-                  "sectores_iniciales": set(),
-              },
           ]
-
-          HEARTBEAT_HORA_UTC = 13
-          HEARTBEAT_HORAS    = 24
 
           TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
           TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
@@ -158,7 +136,7 @@ jobs:
                           if any(p in texto_lower for p in ["agotado", "sold out"]):
                               print("  🔴 Agotado — sin sectores en panel")
                           else:
-                              print("  ⚠️  Sin sectores y sin mensaje de agotado")
+                              print("  ⚠️  Sin sectores detectados")
                   except Exception as e:
                       print(f"  ⚠️  Lectura falló: {e}")
                   await browser.close()
@@ -169,28 +147,16 @@ jobs:
                   try:
                       with open("estado_previo.json") as f:
                           data = json.load(f)
-                          print(f"✅ Estado cargado — eventos con historial: {list(data.keys())}")
+                          print(f"✅ Estado cargado: {list(data.keys())}")
                           return data
                   except Exception:
                       pass
-              print("⚠️  Sin estado previo — primer run global")
+              print("⚠️  Sin estado previo — primer run")
               return {}
 
           def guardar_estado(estado: dict):
               with open("estado_previo.json", "w") as f:
                   json.dump(estado, f, ensure_ascii=False, indent=2)
-
-          def debe_heartbeat(ultimo_hb, ahora: datetime) -> bool:
-              if not ultimo_hb:
-                  return ahora.hour == HEARTBEAT_HORA_UTC
-              try:
-                  dt = datetime.fromisoformat(ultimo_hb)
-                  if dt.tzinfo is None:
-                      dt = dt.replace(tzinfo=timezone.utc)
-                  return (ahora - dt).total_seconds() / 3600 >= HEARTBEAT_HORAS \
-                         and ahora.hour == HEARTBEAT_HORA_UTC
-              except Exception:
-                  return False
 
           # ══════════════════════════════════════════════════════════════════════
           ahora_utc = datetime.now(timezone.utc)
@@ -218,16 +184,12 @@ jobs:
               ev_estado    = estado_global.get(eid, {})
               primera_vez  = ev_estado.get("primera_vez", True)
               panel_prev   = set(ev_estado.get("sectores_panel", []))
-              checks_ok    = ev_estado.get("checks_ok", 0)
-              checks_err   = ev_estado.get("checks_err", 0)
               primer_check = ev_estado.get("primer_check", ahora_utc.isoformat())
-              ultimo_hb    = ev_estado.get("ultimo_heartbeat")
 
               print(f"  primera_vez={primera_vez} | panel_prev={sorted(panel_prev) or '(vacío)'}")
 
               sectores    = asyncio.run(obtener_sectores(url))
               panel_ahora = set(sectores)
-              checks_ok  += 1
 
               if SECTOR_PRUEBA:
                   panel_ahora.add(SECTOR_PRUEBA)
@@ -240,9 +202,10 @@ jobs:
                   if normalizar(s) not in si_norm
               }
 
-              print(f"  Panel ahora: {sorted(panel_ahora) or '(vacío)'}")
-              print(f"  A alertar:   {sorted(sectores_a_alertar) or 'ninguno'}")
+              print(f"  Panel ahora:  {sorted(panel_ahora) or '(vacío)'}")
+              print(f"  A alertar:    {sorted(sectores_a_alertar) or 'ninguno'}")
 
+              # ── Notificaciones ───────────────────────────────────────────────
               if sectores_a_alertar and not primera_vez:
                   prueba_tag = " <i>(PRUEBA)</i>" if SECTOR_PRUEBA else ""
                   lista = "\n".join(f"  🎟 <b>{s}</b>" for s in sorted(sectores_a_alertar))
@@ -253,7 +216,7 @@ jobs:
                       f"⚡ Compra AHORA:\n{url}\n\n"
                       f"🕐 {hora_scl.strftime('%H:%M')} Santiago"
                   )
-                  print(f"  🚨 ALERTA enviada.")
+                  print("  🚨 ALERTA enviada.")
 
               elif primera_vez:
                   estado_txt = (
@@ -263,7 +226,7 @@ jobs:
                   send_telegram(
                       f"👀 <b>Monitoreando: {nombre}</b>\n\n"
                       f"<b>Estado actual:</b>\n{estado_txt}\n\n"
-                      f"Te aviso cuando aparezca cualquier sector 🔄"
+                      f"Te aviso cuando aparezca cualquier sector nuevo 🔄"
                   )
                   print("  📨 Mensaje de inicio enviado.")
 
@@ -277,49 +240,19 @@ jobs:
                       f"Seguimos monitoreando..."
                   )
 
-              if not primera_vez and not SECTOR_PRUEBA and debe_heartbeat(ultimo_hb, ahora_utc):
-                  total = checks_ok + checks_err
-                  tasa  = int(checks_ok / total * 100) if total else 0
-                  icon  = "✅" if tasa >= 90 else ("⚠️" if tasa >= 70 else "❌")
-                  try:
-                      dt0 = datetime.fromisoformat(primer_check).replace(tzinfo=timezone.utc)
-                      dias = (ahora_utc - dt0).days
-                      hrs  = int((ahora_utc - dt0).total_seconds() / 3600)
-                      tiempo_str = f"{dias}d {hrs%24}h" if dias else f"{hrs}h"
-                  except Exception:
-                      tiempo_str = "?"
-                  panel_hb = (
-                      "\n".join(f"  · {s}" for s in sorted(panel_ahora))
-                      if panel_ahora else "  🔴 Agotado"
-                  )
-                  send_telegram(
-                      f"📊 <b>Resumen diario – {nombre}</b>\n"
-                      f"────────────────────────\n"
-                      f"{icon} {'OK' if tasa>=90 else 'Con errores' if tasa>=70 else 'Revisar'}\n"
-                      f"⏱ Activo: {tiempo_str} | Checks: {total} ({tasa}% OK)\n\n"
-                      f"<b>Sectores disponibles:</b>\n{panel_hb}\n\n"
-                      f"<i>Próximo resumen mañana ~9:00 AM 🇨🇱</i>"
-                  )
-                  print("  📊 Heartbeat enviado.")
-                  ultimo_hb = ahora_utc.isoformat()
-
+              # Guardar estado (sector de prueba no se persiste)
               panel_a_guardar = set(sectores) if sectores else panel_prev
               estado_nuevo[eid] = {
-                  "sectores_panel":   list(panel_a_guardar),
-                  "primera_vez":      False,
-                  "checks_ok":        checks_ok,
-                  "checks_err":       checks_err,
-                  "ultimo_heartbeat": ultimo_hb,
-                  "primer_check":     primer_check,
-                  "ultimo_check":     ahora_utc.isoformat(),
+                  "sectores_panel": list(panel_a_guardar),
+                  "primera_vez":    False,
+                  "primer_check":   primer_check,
+                  "ultimo_check":   ahora_utc.isoformat(),
               }
 
           guardar_estado(estado_nuevo)
           print(f"\n{'='*55}\n  ✅ Listo.\n{'='*55}")
           PYEOF
 
-      # Guardar con key dinámica — así siempre crea una entrada nueva
-      # y el próximo run restaura la más reciente con restore-keys
       - name: 💾 Guardar estado
         uses: actions/cache/save@v4
         if: always()
