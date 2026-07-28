@@ -84,7 +84,7 @@ jobs:
                   "nombre":          "Iron Maiden 31 Oct 2026 🤘",
                   "url":             "https://www.ticketmaster.cl/event/iron-maiden-run-for-your-lives-scl-2026-venta-general",
                   # Detectar cuando "31/10/2026" deje de decir "Agotado"
-                  "fecha_agotado":   "31/10/2029",
+                  "fecha_agotado":   "31/10/2026",
                   "sectores_iniciales": set(),
               },
           ]
