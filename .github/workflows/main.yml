@@ -45,16 +45,6 @@ jobs:
           import os, json, asyncio, requests
           from datetime import datetime, timezone, timedelta
 
-          # ══════════════════════════════════════════════════════════════════════
-          #  CONFIGURACIÓN DE EVENTOS
-          #
-          #  fecha_agotado: si está seteado, el evento se detecta de forma especial:
-          #    → busca si esa fecha aparece en la página SIN "agotado" al lado
-          #    → si desaparece el "agotado" → alerta inmediata
-          #  fecha_selector: para eventos con dropdown donde hay que seleccionar fecha
-          #                  para ver el mapa de sectores (no usado aquí)
-          #  sectores_iniciales: sectores ya disponibles hoy (set() = agotado total)
-          # ══════════════════════════════════════════════════════════════════════
           EVENTOS = [
               {
                   "id":              "gorillaz",
@@ -72,7 +62,7 @@ jobs:
                   "id":              "robbie",
                   "nombre":          "Robbie Williams 2026 🎤",
                   "url":             "https://www.ticketmaster.cl/event/robbie-williams-2026-venta-general",
-                  "":   None,
+                  "fecha_agotado":   None,
                   "sectores_iniciales": {
                       "cancha frontal",
                       "cancha general",
@@ -83,7 +73,6 @@ jobs:
                   "id":              "ironmaiden_31oct",
                   "nombre":          "Iron Maiden 31 Oct 2026 🤘",
                   "url":             "https://www.ticketmaster.cl/event/iron-maiden-run-for-your-lives-scl-2026-venta-general",
-                  # Detectar cuando "31/10/2026" deje de decir "Agotado"
                   "fecha_agotado":   "31/10/2026",
                   "sectores_iniciales": set(),
               },
@@ -115,11 +104,40 @@ jobs:
               t = unicodedata.normalize("NFKD", texto.lower())
               return "".join(c for c in t if not unicodedata.combining(c)).strip()
 
+          async def abrir_dropdown(page) -> bool:
+              """Intenta abrir el dropdown de fechas por múltiples estrategias."""
+              selectores = [
+                  "text=Selecciona la función",
+                  "[class*='dropdown']",
+                  "[class*='select']",
+                  "[class*='function']",
+                  "[class*='arrow']",
+                  "[class*='chevron']",
+              ]
+              for sel in selectores:
+                  try:
+                      el = page.locator(sel).first
+                      if await el.is_visible(timeout=2000):
+                          await el.click()
+                          await asyncio.sleep(2)
+                          print(f"  ✅ Dropdown abierto ({sel})")
+                          return True
+                  except Exception:
+                      continue
+
+              # Último recurso: click en cualquier elemento que contenga "Selecciona"
+              try:
+                  await page.get_by_text("Selecciona", exact=False).first.click()
+                  await asyncio.sleep(2)
+                  print("  ✅ Dropdown abierto (fallback texto)")
+                  return True
+              except Exception:
+                  pass
+
+              print("  ⚠️  No se pudo abrir el dropdown")
+              return False
+
           async def obtener_sectores(url: str, fecha_agotado: str | None) -> list:
-              """
-              Carga la página y retorna los sectores visibles en el panel con precio.
-              Para eventos con fecha_agotado: detecta si esa fecha dejó de estar agotada.
-              """
               from playwright.async_api import async_playwright
               sectores = []
 
@@ -146,32 +164,40 @@ jobs:
                   await asyncio.sleep(5)
 
                   try:
-                      texto  = await page.inner_text("body")
-                      lineas = [l.strip() for l in texto.splitlines() if l.strip()]
-                      print(f"  Página cargada: {len(lineas)} líneas")
-
-                      # ── Detección especial para eventos con fecha en dropdown ──
+                      # ── Detección especial: fecha en dropdown ────────────────
                       if fecha_agotado:
+                          # Abrir el dropdown para que aparezcan las fechas
+                          await abrir_dropdown(page)
+
+                          texto  = await page.inner_text("body")
+                          lineas = [l.strip() for l in texto.splitlines() if l.strip()]
+                          print(f"  Página cargada: {len(lineas)} líneas")
+                          print(f"  Buscando fecha: '{fecha_agotado}'")
+
                           texto_lower = texto.lower()
                           fecha_lower = fecha_agotado.lower()
 
                           if fecha_lower in texto_lower:
-                              # Buscar el contexto alrededor de la fecha
-                              idx = texto_lower.find(fecha_lower)
-                              ctx_texto = texto_lower[max(0, idx - 80):idx + 80]
-                              print(f"  Contexto fecha: ...{ctx_texto}...")
+                              idx      = texto_lower.find(fecha_lower)
+                              contexto = texto_lower[max(0, idx - 80):idx + 80]
+                              print(f"  Contexto: ...{contexto.strip()}...")
 
-                              if "agotado" in ctx_texto:
+                              if "agotado" in contexto:
                                   print(f"  🔴 {fecha_agotado} sigue agotado")
                               else:
-                                  # ¡La fecha ya no dice "agotado"!
                                   print(f"  🟢 {fecha_agotado} ya NO dice agotado → DISPONIBLE")
                                   sectores.append(f"Fecha habilitada: {fecha_agotado}")
                           else:
                               print(f"  ⚠️  No se encontró '{fecha_agotado}' en la página")
+                              # Mostrar las primeras líneas para debug
+                              print(f"  Primeras líneas: {lineas[:15]}")
 
-                      # ── Detección normal de sectores con precio ────────────────
+                      # ── Detección normal: sectores con precio ────────────────
                       else:
+                          texto  = await page.inner_text("body")
+                          lineas = [l.strip() for l in texto.splitlines() if l.strip()]
+                          print(f"  Página cargada: {len(lineas)} líneas")
+
                           for i, linea in enumerate(lineas):
                               ll = linea.lower().replace(" ", "")
                               if "desde$" in ll and any(c.isdigit() for c in linea):
