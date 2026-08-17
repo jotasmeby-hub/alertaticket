@@ -1,22 +1,18 @@
 name: 🎵 Monitor de Conciertos
-
 on:
   schedule:
     - cron: "*/5 * * * *"
-
   workflow_dispatch:
     inputs:
       sector_prueba:
         description: "🧪 Sector inventado para probar la alerta (ej: 'Platea VIP'). Déjalo vacío para correr normal."
         type: string
         default: ""
-
 jobs:
   check-tickets:
     name: Chequear disponibilidad
     runs-on: ubuntu-latest
     timeout-minutes: 4
-
     steps:
       - name: 📂 Restaurar estado previo
         uses: actions/cache/restore@v4
@@ -24,17 +20,14 @@ jobs:
           path: estado_previo.json
           key: tm-estado-${{ github.run_id }}
           restore-keys: tm-estado-
-
       - name: 🐍 Configurar Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
       - name: 📦 Instalar dependencias
         run: |
           pip install playwright requests
           playwright install chromium --with-deps
-
       - name: 🔍 Chequear disponibilidad
         env:
           TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
@@ -44,7 +37,6 @@ jobs:
           python - <<'PYEOF'
           import os, json, asyncio, requests
           from datetime import datetime, timezone, timedelta
-
           EVENTOS = [
               {
                   "id":              "gorillaz",
@@ -76,12 +68,20 @@ jobs:
                   "fecha_agotado":   "31/10/2026",
                   "sectores_iniciales": set(),
               },
+              {
+                  "id":              "foofighters",
+                  "nombre":          "Foo Fighters Chile 2027 🔥",
+                  "url":             "https://www.ticketmaster.cl/event/foo-fighters-live-2027-scl-venta-general",
+                  "fecha_agotado":   None,
+                  "sectores_iniciales": set(),
+                  # Solo nos interesa que avise cuando ESTE sector puntual aparezca
+                  # disponible; cualquier otro sector nuevo se ignora.
+                  "sector_objetivo": "Platea Poniente",
+              },
           ]
-
           TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
           TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
           SECTOR_PRUEBA    = os.environ.get("SECTOR_PRUEBA", "").strip()
-
           def send_telegram(msg: str) -> bool:
               if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
                   print("  ⚠️  Sin credenciales Telegram")
@@ -98,12 +98,10 @@ jobs:
               except Exception as e:
                   print(f"  ❌ Telegram error: {e}")
                   return False
-
           def normalizar(texto: str) -> str:
               import unicodedata
               t = unicodedata.normalize("NFKD", texto.lower())
               return "".join(c for c in t if not unicodedata.combining(c)).strip()
-
           async def abrir_dropdown(page) -> bool:
               """Intenta abrir el dropdown de fechas por múltiples estrategias."""
               selectores = [
@@ -124,7 +122,6 @@ jobs:
                           return True
                   except Exception:
                       continue
-
               # Último recurso: click en cualquier elemento que contenga "Selecciona"
               try:
                   await page.get_by_text("Selecciona", exact=False).first.click()
@@ -133,14 +130,20 @@ jobs:
                   return True
               except Exception:
                   pass
-
               print("  ⚠️  No se pudo abrir el dropdown")
               return False
-
-          async def obtener_sectores(url: str, fecha_agotado: str | None) -> list:
+          async def obtener_sectores(url: str, fecha_agotado: str | None) -> tuple[list, bool]:
+              """Devuelve (sectores_encontrados, confirmado).
+              'confirmado' indica si esta lectura es confiable: True cuando la página
+              se pudo leer y el resultado (incluso vacío) refleja el estado real, o
+              False cuando hubo una falla de scraping y no se sabe qué pasó de verdad.
+              Solo se debe pisar el estado guardado cuando confirmado=True, así una
+              falla puntual no hace pensar que "se agotó" algo que en realidad seguía
+              disponible (o viceversa).
+              """
               from playwright.async_api import async_playwright
               sectores = []
-
+              confirmado = False
               async with async_playwright() as pw:
                   browser = await pw.chromium.launch(
                       headless=True,
@@ -152,7 +155,6 @@ jobs:
                       timezone_id="America/Santiago",
                       viewport={"width": 1440, "height": 900})
                   page = await ctx.new_page()
-
                   try:
                       await page.goto(url, wait_until="networkidle", timeout=28000)
                   except Exception:
@@ -160,44 +162,39 @@ jobs:
                           await page.goto(url, wait_until="domcontentloaded", timeout=28000)
                       except Exception as e:
                           print(f"  ⚠️  Goto falló: {e}")
-
                   await asyncio.sleep(5)
-
                   try:
                       # ── Detección especial: fecha en dropdown ────────────────
                       if fecha_agotado:
                           # Abrir el dropdown para que aparezcan las fechas
                           await abrir_dropdown(page)
-
                           texto  = await page.inner_text("body")
                           lineas = [l.strip() for l in texto.splitlines() if l.strip()]
                           print(f"  Página cargada: {len(lineas)} líneas")
                           print(f"  Buscando fecha: '{fecha_agotado}'")
-
                           texto_lower = texto.lower()
                           fecha_lower = fecha_agotado.lower()
-
                           if fecha_lower in texto_lower:
                               idx      = texto_lower.find(fecha_lower)
                               contexto = texto_lower[max(0, idx - 80):idx + 80]
                               print(f"  Contexto: ...{contexto.strip()}...")
-
                               if "agotado" in contexto:
                                   print(f"  🔴 {fecha_agotado} sigue agotado")
+                                  confirmado = True  # lectura confiable: sigue agotado
                               else:
                                   print(f"  🟢 {fecha_agotado} ya NO dice agotado → DISPONIBLE")
                                   sectores.append(f"Fecha habilitada: {fecha_agotado}")
+                                  confirmado = True  # lectura confiable: disponible
                           else:
-                              print(f"  ⚠️  No se encontró '{fecha_agotado}' en la página")
+                              print(f"  ⚠️  No se encontró '{fecha_agotado}' en la página — no se pudo confirmar el estado")
                               # Mostrar las primeras líneas para debug
                               print(f"  Primeras líneas: {lineas[:15]}")
-
+                              # confirmado queda False: no sabemos qué pasó de verdad
                       # ── Detección normal: sectores con precio ────────────────
                       else:
                           texto  = await page.inner_text("body")
                           lineas = [l.strip() for l in texto.splitlines() if l.strip()]
                           print(f"  Página cargada: {len(lineas)} líneas")
-
                           for i, linea in enumerate(lineas):
                               ll = linea.lower().replace(" ", "")
                               if "desde$" in ll and any(c.isdigit() for c in linea):
@@ -208,21 +205,21 @@ jobs:
                                               and not nombre.startswith("$")):
                                           sectores.append(nombre)
                                           print(f"  ✅ Sector: '{nombre}'")
-
-                          if not sectores:
+                          if sectores:
+                              confirmado = True  # encontramos sectores reales
+                          else:
                               texto_lower = texto.lower()
                               if any(p in texto_lower for p in ["agotado", "sold out"]):
                                   print("  🔴 Agotado — sin sectores en panel")
+                                  confirmado = True  # lectura confiable: todo agotado
                               else:
-                                  print("  ⚠️  Sin sectores detectados")
-
+                                  print("  ⚠️  Sin sectores detectados — no se pudo confirmar el estado")
+                                  # confirmado queda False: probable falla de scraping
                   except Exception as e:
                       print(f"  ⚠️  Lectura falló: {e}")
-
+                      # confirmado queda False
                   await browser.close()
-
-              return sectores
-
+              return sectores, confirmado
           def cargar_estado() -> dict:
               if os.path.exists("estado_previo.json"):
                   try:
@@ -234,63 +231,63 @@ jobs:
                       pass
               print("⚠️  Sin estado previo")
               return {}
-
           def guardar_estado(estado: dict):
               with open("estado_previo.json", "w") as f:
                   json.dump(estado, f, ensure_ascii=False, indent=2)
-
           # ══════════════════════════════════════════════════════════════════════
           ahora_utc = datetime.now(timezone.utc)
           hora_scl  = ahora_utc - timedelta(hours=4)
-
           print("=" * 55)
           print(f"  🎵 {ahora_utc.strftime('%Y-%m-%d %H:%M UTC')} ({hora_scl.strftime('%H:%M')} SCL)")
           if SECTOR_PRUEBA:
               print(f"  🧪 MODO PRUEBA — sector: '{SECTOR_PRUEBA}'")
           print("=" * 55)
-
           estado_global = cargar_estado()
           estado_nuevo  = {}
-
           for evento in EVENTOS:
               eid           = evento["id"]
               nombre        = evento["nombre"]
               url           = evento["url"]
               fecha_agotado = evento.get("fecha_agotado")
+              sector_objetivo = evento.get("sector_objetivo")
               si_norm       = {normalizar(s) for s in evento["sectores_iniciales"]}
-
               print(f"\n{'─'*55}")
               print(f"  {nombre}")
               print(f"{'─'*55}")
-
               ev_estado    = estado_global.get(eid, {})
               es_baseline  = not ev_estado
               panel_prev   = set(ev_estado.get("sectores_panel", []))
               primer_check = ev_estado.get("primer_check", ahora_utc.isoformat())
-
               print(f"  baseline={es_baseline} | panel_prev={sorted(panel_prev) or '(vacío)'}")
-
-              sectores    = asyncio.run(obtener_sectores(url, fecha_agotado))
+              sectores, confirmado = asyncio.run(obtener_sectores(url, fecha_agotado))
               panel_ahora = set(sectores)
-
               if SECTOR_PRUEBA:
                   panel_ahora.add(SECTOR_PRUEBA)
+                  confirmado = True  # el modo prueba siempre se considera confirmado
                   print(f"  🧪 Inyectado: '{SECTOR_PRUEBA}'")
-
-              print(f"  Panel ahora: {sorted(panel_ahora) or '(vacío)'}")
-
+              print(f"  Panel ahora: {sorted(panel_ahora) or '(vacío)'} | confirmado={confirmado}")
               if es_baseline:
                   print("  📌 Baseline guardado — próximo run detectará cambios")
+              elif not confirmado:
+                  print("  ⚠️  No se pudo confirmar el estado esta vez (posible falla de scraping) "
+                        "— se mantiene el estado anterior y no se envían alertas.")
               else:
                   sectores_nuevos   = panel_ahora - panel_prev
                   sectores_perdidos = panel_prev  - panel_ahora
-                  sectores_a_alertar = {
-                      s for s in sectores_nuevos
-                      if normalizar(s) not in si_norm
-                  }
-
+                  if sector_objetivo:
+                      obj_norm = normalizar(sector_objetivo)
+                      sectores_a_alertar = {
+                          s for s in sectores_nuevos if obj_norm in normalizar(s)
+                      }
+                      sectores_perdidos = {
+                          s for s in sectores_perdidos if obj_norm in normalizar(s)
+                      }
+                  else:
+                      sectores_a_alertar = {
+                          s for s in sectores_nuevos
+                          if normalizar(s) not in si_norm
+                      }
                   print(f"  A alertar: {sorted(sectores_a_alertar) or 'ninguno'}")
-
                   if sectores_a_alertar:
                       prueba_tag = " <i>(PRUEBA)</i>" if SECTOR_PRUEBA else ""
                       lista = "\n".join(f"  🎟 <b>{s}</b>" for s in sorted(sectores_a_alertar))
@@ -304,25 +301,24 @@ jobs:
                       print("  🚨 ALERTA enviada.")
                   else:
                       print("  ✅ Sin cambios.")
-
                   if sectores_perdidos:
                       send_telegram(
                           f"😞 <b>Sector se agotó – {nombre}</b>\n"
                           f"Ya no disponible: {', '.join(sorted(sectores_perdidos))}\n"
                           f"Seguimos monitoreando..."
                       )
-
-              panel_a_guardar = set(sectores) if sectores else panel_prev
+              # Solo pisamos el estado guardado si la lectura de esta vez fue confiable.
+              # Si hubo falla de scraping (confirmado=False), mantenemos panel_prev tal
+              # cual para no "congelar" un estado viejo ni gatillar alertas falsas.
+              panel_a_guardar = panel_ahora if confirmado else panel_prev
               estado_nuevo[eid] = {
                   "sectores_panel": list(panel_a_guardar),
                   "primer_check":   primer_check,
                   "ultimo_check":   ahora_utc.isoformat(),
               }
-
           guardar_estado(estado_nuevo)
           print(f"\n{'='*55}\n  ✅ Listo.\n{'='*55}")
           PYEOF
-
       - name: 💾 Guardar estado
         uses: actions/cache/save@v4
         if: always()
