@@ -45,14 +45,6 @@ jobs:
           import os, json, asyncio, requests
           from datetime import datetime, timezone, timedelta
 
-          # ══════════════════════════════════════════════════════════════════════
-          #  EVENTOS MONITOREADOS
-          #
-          #  sectores_iniciales → sectores YA disponibles hoy (no alertar por ellos)
-          #  fecha_agotado      → detectar cuando esa fecha deje de decir "Agotado"
-          #  fecha_selector     → texto del dropdown para seleccionar la fecha correcta
-          #                       antes de leer el panel de sectores
-          # ══════════════════════════════════════════════════════════════════════
           EVENTOS = [
               {
                   "id":               "gorillaz",
@@ -61,10 +53,7 @@ jobs:
                   "fecha_agotado":    None,
                   "fecha_selector":   None,
                   "sectores_iniciales": {
-                      "pit",
-                      "pacifico sur",
-                      "pacífico sur",
-                      "cancha frontal",
+                      "pit", "pacifico sur", "pacífico sur", "cancha frontal",
                   },
               },
               {
@@ -74,9 +63,7 @@ jobs:
                   "fecha_agotado":    None,
                   "fecha_selector":   None,
                   "sectores_iniciales": {
-                      "cancha frontal",
-                      "cancha general",
-                      "accesibilidad universal",
+                      "cancha frontal", "cancha general", "accesibilidad universal",
                   },
               },
               {
@@ -92,24 +79,27 @@ jobs:
                   "nombre":           "Ed Sheeran 2026 🎵",
                   "url":              "https://www.ticketmaster.cl/event/ed-sheeran-loop-tour-2026-scl-venta-general",
                   "fecha_agotado":    None,
-                  # Seleccionar "21/11/2026" en el dropdown (no el 22)
                   "fecha_selector":   "21/11/2026",
-                  # Sectores YA disponibles hoy — Tribuna Central NO está aquí
-                  # porque está apagada. Cuando aparezca → alerta
                   "sectores_iniciales": {
-                      "pacifico centro",
-                      "pacífico centro",
+                      "pacifico centro", "pacífico centro",
                       "platea zafiro",
-                      "pacifico sur",
-                      "pacífico sur",
-                      "cancha frontal pacifico",
-                      "cancha frontal pacífico",
+                      "pacifico sur", "pacífico sur",
+                      "cancha frontal pacifico", "cancha frontal pacífico",
                       "cancha frontal andes",
-                      "platea royal",
-                      "platea baja",
-                      "cancha general",
-                      "movilidad reducida",
+                      "platea royal", "platea baja",
+                      "cancha general", "movilidad reducida",
                   },
+              },
+              {
+                  "id":               "foofighters",
+                  "nombre":           "Foo Fighters 2027 🤘",
+                  "url":              "https://www.ticketmaster.cl/event/foo-fighters-live-2027-scl-venta-general",
+                  "fecha_agotado":    None,
+                  "fecha_selector":   None,
+                  # set() vacío = el primer run guarda el baseline automáticamente
+                  # A partir del segundo run, cualquier sector nuevo alertará
+                  # (incluyendo Platea Oriente y Platea Poniente cuando se prendan)
+                  "sectores_iniciales": set(),
               },
           ]
 
@@ -140,19 +130,11 @@ jobs:
               return "".join(c for c in t if not unicodedata.combining(c)).strip()
 
           async def seleccionar_fecha(page, fecha: str) -> bool:
-              """
-              Abre el dropdown de fechas y selecciona la que contiene el texto dado.
-              Retorna True si se pudo seleccionar.
-              """
               print(f"  🗓  Seleccionando fecha: '{fecha}'")
-
-              # Intentar abrir el dropdown con varios selectores
               for sel in [
                   "text=Selecciona la función",
-                  "[class*='dropdown']",
-                  "[class*='select']",
-                  "[class*='function']",
-                  "[class*='arrow']",
+                  "[class*='dropdown']", "[class*='select']",
+                  "[class*='function']", "[class*='arrow']",
               ]:
                   try:
                       el = page.locator(sel).first
@@ -162,8 +144,6 @@ jobs:
                           break
                   except Exception:
                       continue
-
-              # Buscar y clickear la opción con la fecha
               for sel in [
                   f"text={fecha}",
                   f"[class*='option']:has-text('{fecha}')",
@@ -178,23 +158,19 @@ jobs:
                           return True
                   except Exception:
                       continue
-
-              # Fallback: buscar por texto parcial
               try:
                   await page.get_by_text(fecha, exact=False).first.click()
                   await asyncio.sleep(4)
                   print(f"  ✅ Fecha seleccionada (fallback): {fecha}")
                   return True
               except Exception as e:
-                  print(f"  ⚠️  No se pudo seleccionar la fecha '{fecha}': {e}")
+                  print(f"  ⚠️  No se pudo seleccionar '{fecha}': {e}")
                   return False
 
-          async def abrir_dropdown_iron_maiden(page) -> bool:
+          async def abrir_dropdown_agotado(page) -> bool:
               for sel in [
-                  "text=Selecciona la función",
-                  "[class*='dropdown']",
-                  "[class*='select']",
-                  "[class*='arrow']",
+                  "text=Selecciona la función", "[class*='dropdown']",
+                  "[class*='select']", "[class*='arrow']",
               ]:
                   try:
                       el = page.locator(sel).first
@@ -212,8 +188,7 @@ jobs:
                   pass
               return False
 
-          async def obtener_sectores(url: str, fecha_agotado: str | None,
-                                     fecha_selector: str | None) -> list:
+          async def obtener_sectores(url: str, fecha_agotado, fecha_selector) -> list:
               from playwright.async_api import async_playwright
               sectores = []
               async with async_playwright() as pw:
@@ -223,11 +198,9 @@ jobs:
                   ctx = await browser.new_context(
                       user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
                                  "Chrome/124.0.0.0 Safari/537.36",
-                      locale="es-CL",
-                      timezone_id="America/Santiago",
+                      locale="es-CL", timezone_id="America/Santiago",
                       viewport={"width": 1440, "height": 900})
                   page = await ctx.new_page()
-
                   try:
                       await page.goto(url, wait_until="networkidle", timeout=28000)
                   except Exception:
@@ -235,13 +208,10 @@ jobs:
                           await page.goto(url, wait_until="domcontentloaded", timeout=28000)
                       except Exception as e:
                           print(f"  ⚠️  Goto falló: {e}")
-
                   await asyncio.sleep(5)
-
                   try:
-                      # ── Caso 1: fecha en dropdown tipo Iron Maiden (agotado) ──
                       if fecha_agotado:
-                          await abrir_dropdown_iron_maiden(page)
+                          await abrir_dropdown_agotado(page)
                           texto       = await page.inner_text("body")
                           texto_lower = texto.lower()
                           fecha_lower = fecha_agotado.lower()
@@ -253,17 +223,13 @@ jobs:
                               if "agotado" in contexto:
                                   print(f"  🔴 {fecha_agotado} sigue agotado")
                               else:
-                                  print(f"  🟢 {fecha_agotado} ya NO dice agotado → DISPONIBLE")
+                                  print(f"  🟢 {fecha_agotado} → DISPONIBLE")
                                   sectores.append(f"Fecha habilitada: {fecha_agotado}")
                           else:
-                              print(f"  ⚠️  No se encontró '{fecha_agotado}' en la página")
+                              print(f"  ⚠️  No se encontró '{fecha_agotado}'")
 
-                      # ── Caso 2: seleccionar fecha y leer panel de sectores ──
                       elif fecha_selector:
-                          ok = await seleccionar_fecha(page, fecha_selector)
-                          if not ok:
-                              print(f"  ⚠️  No se pudo seleccionar la fecha — leyendo igual")
-
+                          await seleccionar_fecha(page, fecha_selector)
                           texto  = await page.inner_text("body")
                           lineas = [l.strip() for l in texto.splitlines() if l.strip()]
                           print(f"  Página cargada: {len(lineas)} líneas")
@@ -277,10 +243,7 @@ jobs:
                                               and not nombre.startswith("$")):
                                           sectores.append(nombre)
                                           print(f"  ✅ Sector: '{nombre}'")
-                          if not sectores:
-                              print("  ⚠️  Sin sectores detectados tras seleccionar fecha")
 
-                      # ── Caso 3: detección normal sin dropdown ──────────────
                       else:
                           texto  = await page.inner_text("body")
                           lineas = [l.strip() for l in texto.splitlines() if l.strip()]
@@ -298,13 +261,12 @@ jobs:
                           if not sectores:
                               texto_lower = texto.lower()
                               if any(p in texto_lower for p in ["agotado", "sold out"]):
-                                  print("  🔴 Agotado — sin sectores en panel")
+                                  print("  🔴 Agotado — sin sectores")
                               else:
                                   print("  ⚠️  Sin sectores detectados")
 
                   except Exception as e:
                       print(f"  ⚠️  Lectura falló: {e}")
-
                   await browser.close()
               return sectores
 
@@ -368,8 +330,8 @@ jobs:
               if es_baseline:
                   print("  📌 Baseline guardado — próximo run detectará cambios")
               else:
-                  sectores_nuevos   = panel_ahora - panel_prev
-                  sectores_perdidos = panel_prev  - panel_ahora
+                  sectores_nuevos    = panel_ahora - panel_prev
+                  sectores_perdidos  = panel_prev  - panel_ahora
                   sectores_a_alertar = {
                       s for s in sectores_nuevos
                       if normalizar(s) not in si_norm
