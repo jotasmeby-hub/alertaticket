@@ -22,7 +22,6 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: estado_previo.json
-          # Cache key v2 — resetea el estado pegado de Iron Maiden
           key: tm-estado2-${{ github.run_id }}
           restore-keys: tm-estado2-
 
@@ -56,7 +55,6 @@ jobs:
                   "sectores_iniciales": {
                       "pit", "pacifico sur", "pacífico sur", "cancha frontal",
                   },
-              },
               },
               {
                   "id":               "ironmaiden_31oct",
@@ -341,8 +339,7 @@ jobs:
                   else:
                       print("  ✅ Sin cambios.")
 
-                  # Solo notificar "se agotó" si NO es un evento fecha_agotado
-                  # (para esos, agotarse es el estado normal y no hay que spamear)
+                  # No spamear "se agotó" para eventos tipo fecha_agotado
                   if sectores_perdidos and not fecha_agotado:
                       send_telegram(
                           f"😞 <b>Sector se agotó – {nombre}</b>\n"
@@ -350,10 +347,9 @@ jobs:
                           f"Seguimos monitoreando..."
                       )
 
-              # FIX CLAVE: para eventos fecha_agotado siempre guardar el estado
-              # actual (aunque sea vacío), nunca el anterior pegado
+              # Para eventos fecha_agotado: siempre guardar estado actual
               if fecha_agotado:
-                  panel_a_guardar = panel_ahora  # siempre actual, aunque sea set()
+                  panel_a_guardar = panel_ahora
               else:
                   panel_a_guardar = set(sectores) if sectores else panel_prev
 
