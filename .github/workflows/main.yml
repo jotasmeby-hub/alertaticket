@@ -57,15 +57,6 @@ jobs:
                       "pit", "pacifico sur", "pacífico sur", "cancha frontal",
                   },
               },
-              {
-                  "id":               "robbie",
-                  "nombre":           "Robbie Williams 2026 🎤",
-                  "url":              "https://www.ticketmaster.cl/event/robbie-williams-2026-venta-general",
-                  "fecha_agotado":    None,
-                  "fecha_selector":   None,
-                  "sectores_iniciales": {
-                      "cancha frontal", "cancha general", "accesibilidad universal",
-                  },
               },
               {
                   "id":               "ironmaiden_31oct",
