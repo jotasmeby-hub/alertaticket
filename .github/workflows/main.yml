@@ -209,8 +209,34 @@ jobs:
                               if "agotado" in contexto:
                                   print(f"  🔴 {fecha_agotado} sigue agotado")
                               else:
-                                  print(f"  🟢 {fecha_agotado} → DISPONIBLE")
-                                  sectores.append(f"Fecha habilitada: {fecha_agotado}")
+                                  print(f"  🟢 {fecha_agotado} → DISPONIBLE — leyendo sectores...")
+                                  # Seleccionar la fecha y leer el panel de sectores
+                                  await seleccionar_fecha(page, fecha_agotado)
+                                  texto2  = await page.inner_text("body")
+                                  lineas2 = [l.strip() for l in texto2.splitlines() if l.strip()]
+                                  print(f"  Líneas tras seleccionar fecha: {len(lineas2)}")
+                                  sectores_encontrados = []
+                                  for i, linea in enumerate(lineas2):
+                                      ll = linea.lower().replace(" ", "")
+                                      if "desde$" in ll and any(c.isdigit() for c in linea):
+                                          if i > 0:
+                                              nombre = lineas2[i-1].strip()
+                                              if (2 < len(nombre) < 70
+                                                      and not nombre.lower().startswith("desde")
+                                                      and not nombre.startswith("$")):
+                                                  sectores_encontrados.append(nombre)
+                                                  print(f"  ✅ Sector: '{nombre}'")
+                                  if sectores_encontrados:
+                                      # Destacar Cancha General y Pacífico Medio
+                                      for s in sectores_encontrados:
+                                          sl = s.lower()
+                                          if "cancha general" in sl or "pacifico medio" in sl or "pacífico medio" in sl:
+                                              sectores.append(f"⭐ {s}")
+                                          else:
+                                              sectores.append(s)
+                                  else:
+                                      # No encontró sectores con "Desde $" — fecha disponible pero sin panel legible
+                                      sectores.append(f"Fecha habilitada: {fecha_agotado} (sin sectores visibles)")
                           else:
                               print(f"  ⚠️  No se encontró '{fecha_agotado}'")
 
