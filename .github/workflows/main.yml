@@ -385,13 +385,9 @@ jobs:
                   else:
                       print("  ✅ Sin cambios.")
 
-                  # No spamear "se agotó" para eventos tipo fecha_agotado
-                  if sectores_perdidos and not fecha_agotado:
-                      send_telegram(
-                          f"😞 <b>Sector se agotó – {nombre}</b>\n"
-                          f"Ya no disponible: {', '.join(sorted(sectores_perdidos))}\n"
-                          f"Seguimos monitoreando..."
-                      )
+                  # No alertar cuando sectores desaparecen (falsos positivos por carga de página)
+                  if sectores_perdidos:
+                      print(f"  ℹ️  Perdidos (sin alerta): {sorted(sectores_perdidos)}")
 
               # Para eventos fecha_agotado: siempre guardar estado actual
               if fecha_agotado:
