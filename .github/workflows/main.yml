@@ -88,6 +88,14 @@ jobs:
                   "fecha_selector":   None,
                   "sectores_iniciales": set(),
               },
+              {
+                  "id":               "bts_17oct",
+                  "nombre":           "BTS 17 Oct 2026 🎤",
+                  "url":              "https://www.ticketmaster.cl/event/bts-world-tour-arirang-live-2026-scl-venta-general-17-de-octubre",
+                  "fecha_agotado":    None,
+                  "fecha_selector":   None,
+                  "sectores_iniciales": set(),
+              },
           ]
 
           TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
@@ -226,11 +234,15 @@ jobs:
                                                       and not nombre.startswith("$")):
                                                   sectores_encontrados.append(nombre)
                                                   print(f"  ✅ Sector: '{nombre}'")
+                                  DESTACADOS_GLOBAL = {
+                                      "cancha general", "pacifico medio", "pacífico medio",
+                                      "galeria norte", "galería norte",
+                                  }
                                   if sectores_encontrados:
-                                      # Destacar Cancha General y Pacífico Medio
+                                      # Destacar sectores de interés
                                       for s in sectores_encontrados:
                                           sl = s.lower()
-                                          if "cancha general" in sl or "pacifico medio" in sl or "pacífico medio" in sl:
+                                          if any(d in sl for d in DESTACADOS_GLOBAL):
                                               sectores.append(f"⭐ {s}")
                                           else:
                                               sectores.append(s)
@@ -257,6 +269,10 @@ jobs:
                                           print(f"  ✅ Sector: '{nombre}'")
 
                       else:
+                          DESTACADOS_GLOBAL = {
+                              "cancha general", "pacifico medio", "pacífico medio",
+                              "galeria norte", "galería norte",
+                          }
                           texto  = await page.inner_text("body")
                           lineas = [l.strip() for l in texto.splitlines() if l.strip()]
                           print(f"  Página cargada: {len(lineas)} líneas")
@@ -268,7 +284,11 @@ jobs:
                                       if (2 < len(nombre) < 70
                                               and not nombre.lower().startswith("desde")
                                               and not nombre.startswith("$")):
-                                          sectores.append(nombre)
+                                          nl = nombre.lower()
+                                          if any(d in nl for d in DESTACADOS_GLOBAL):
+                                              sectores.append(f"⭐ {nombre}")
+                                          else:
+                                              sectores.append(nombre)
                                           print(f"  ✅ Sector: '{nombre}'")
                           if not sectores:
                               texto_lower = texto.lower()
