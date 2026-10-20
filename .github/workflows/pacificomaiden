@@ -139,6 +139,31 @@ jobs:
 
                       await asyncio.sleep(2)
 
+                      # ── Paso 1b: Click en "Comprar" para abrir el mapa ───────────
+                      print("  🛒 Buscando botón Comprar...")
+                      clicked_comprar = False
+                      for sel in [
+                          "button:has-text('Comprar')",
+                          "a:has-text('Comprar')",
+                          "[class*='buy']:has-text('Comprar')",
+                          "text=Comprar",
+                      ]:
+                          try:
+                              el = page.locator(sel).first
+                              if await el.is_visible(timeout=3000):
+                                  await el.click()
+                                  await asyncio.sleep(6)
+                                  clicked_comprar = True
+                                  print("  ✅ Click en Comprar")
+                                  break
+                          except Exception:
+                              continue
+
+                      if not clicked_comprar:
+                          print("  ⚠️  No pude hacer click en Comprar — continuando igual")
+
+                      await asyncio.sleep(2)
+
                       # ── Paso 2: Verificar que Pacífico Medio existe en la página ─
                       texto = await page.inner_text("body")
                       texto_lower = texto.lower()
