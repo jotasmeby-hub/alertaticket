@@ -1,29 +1,24 @@
-name: 🎵 Monitor de Conciertos
+name: 🤘 Iron Maiden — Pacífico Medio × 2
 
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "*/5 * * * *"   # cada 5 minutos
 
-  workflow_dispatch:
-    inputs:
-      sector_prueba:
-        description: "🧪 Sector inventado para probar la alerta (ej: 'Platea VIP'). Déjalo vacío para correr normal."
-        type: string
-        default: ""
+  workflow_dispatch: {}
 
 jobs:
-  check-tickets:
-    name: Chequear disponibilidad
+  check-pacifico-medio:
+    name: Verificar 2 entradas Pacífico Medio
     runs-on: ubuntu-latest
-    timeout-minutes: 4
+    timeout-minutes: 5
 
     steps:
       - name: 📂 Restaurar estado previo
         uses: actions/cache/restore@v4
         with:
-          path: estado_previo.json
-          key: tm-estado2-${{ github.run_id }}
-          restore-keys: tm-estado2-
+          path: estado_pm.json
+          key: pm-estado-${{ github.run_id }}
+          restore-keys: pm-estado-
 
       - name: 🐍 Configurar Python
         uses: actions/setup-python@v5
@@ -32,159 +27,61 @@ jobs:
 
       - name: 📦 Instalar dependencias
         run: |
-          pip install playwright requests
+          pip install playwright requests --break-system-packages 2>/dev/null || pip install playwright requests
           playwright install chromium --with-deps
 
-      - name: 🔍 Chequear disponibilidad
+      - name: 🔍 Chequear Pacífico Medio ×2
         env:
           TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          SECTOR_PRUEBA:    ${{ inputs.sector_prueba }}
         run: |
           python - <<'PYEOF'
           import os, json, asyncio, requests
           from datetime import datetime, timezone, timedelta
-
-          EVENTOS = [
-              {
-                  "id":               "gorillaz",
-                  "nombre":           "Gorillaz Chile 2026 🎸",
-                  "url":              "https://www.ticketmaster.cl/event/gorillaz-live-2026-scl-venta-general",
-                  "fecha_agotado":    None,
-                  "fecha_selector":   None,
-                  "sectores_iniciales": {
-                      "pit", "pacifico sur", "pacífico sur", "cancha frontal",
-                  },
-              },
-              {
-                  "id":               "ironmaiden_31oct",
-                  "nombre":           "Iron Maiden 31 Oct 2026 🤘",
-                  "url":              "https://www.ticketmaster.cl/event/iron-maiden-run-for-your-lives-scl-2026-venta-general",
-                  "fecha_agotado":    "31/10/2026",
-                  "fecha_selector":   None,
-                  "sectores_iniciales": set(),
-              },
-              {
-                  "id":               "edsheeran",
-                  "nombre":           "Ed Sheeran 2026 🎵",
-                  "url":              "https://www.ticketmaster.cl/event/ed-sheeran-loop-tour-2026-scl-venta-general",
-                  "fecha_agotado":    None,
-                  "fecha_selector":   "21/11/2026",
-                  "sectores_iniciales": {
-                      "pacifico centro", "pacífico centro",
-                      "platea zafiro",
-                      "pacifico sur", "pacífico sur",
-                      "cancha frontal pacifico", "cancha frontal pacífico",
-                      "cancha frontal andes",
-                      "platea royal", "platea baja",
-                      "cancha general", "movilidad reducida",
-                  },
-              },
-              {
-                  "id":               "foofighters",
-                  "nombre":           "Foo Fighters 2027 🤘",
-                  "url":              "https://www.ticketmaster.cl/event/foo-fighters-live-2027-scl-venta-general",
-                  "fecha_agotado":    None,
-                  "fecha_selector":   None,
-                  "sectores_iniciales": set(),
-              },
-              {
-                  "id":               "bts_17oct",
-                  "nombre":           "BTS 17 Oct 2026 🎤",
-                  "url":              "https://www.ticketmaster.cl/event/bts-world-tour-arirang-live-2026-scl-venta-general-17-de-octubre",
-                  "fecha_agotado":    None,
-                  "fecha_selector":   None,
-                  "sectores_iniciales": set(),
-              },
-          ]
+          from playwright.async_api import async_playwright
 
           TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
           TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
-          SECTOR_PRUEBA    = os.environ.get("SECTOR_PRUEBA", "").strip()
+          URL_EVENTO = "https://www.ticketmaster.cl/event/iron-maiden-run-for-your-lives-scl-2026-venta-general"
+          FECHA      = "31/10/2026"
 
-          def send_telegram(msg: str) -> bool:
+          def send_telegram(msg: str):
               if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
                   print("  ⚠️  Sin credenciales Telegram")
-                  return False
+                  return
               try:
                   r = requests.post(
                       f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
                       json={"chat_id": TELEGRAM_CHAT_ID, "text": msg,
-                            "parse_mode": "HTML", "disable_web_page_preview": False},
+                            "parse_mode": "HTML", "disable_web_page_preview": True},
                       timeout=10)
                   r.raise_for_status()
                   print("  ✅ Telegram OK")
-                  return True
               except Exception as e:
                   print(f"  ❌ Telegram error: {e}")
-                  return False
 
-          def normalizar(texto: str) -> str:
-              import unicodedata
-              t = unicodedata.normalize("NFKD", texto.lower())
-              return "".join(c for c in t if not unicodedata.combining(c)).strip()
-
-          async def seleccionar_fecha(page, fecha: str) -> bool:
-              print(f"  🗓  Seleccionando fecha: '{fecha}'")
-              for sel in [
-                  "text=Selecciona la función", "[class*='dropdown']",
-                  "[class*='select']", "[class*='function']", "[class*='arrow']",
-              ]:
+          def cargar_estado():
+              if os.path.exists("estado_pm.json"):
                   try:
-                      el = page.locator(sel).first
-                      if await el.is_visible(timeout=2000):
-                          await el.click()
-                          await asyncio.sleep(2)
-                          break
+                      with open("estado_pm.json") as f:
+                          return json.load(f)
                   except Exception:
-                      continue
-              for sel in [
-                  f"text={fecha}",
-                  f"[class*='option']:has-text('{fecha}')",
-                  f"li:has-text('{fecha}')",
-              ]:
-                  try:
-                      el = page.locator(sel).first
-                      if await el.is_visible(timeout=2000):
-                          await el.click()
-                          await asyncio.sleep(4)
-                          print(f"  ✅ Fecha seleccionada: {fecha}")
-                          return True
-                  except Exception:
-                      continue
-              try:
-                  await page.get_by_text(fecha, exact=False).first.click()
-                  await asyncio.sleep(4)
-                  print(f"  ✅ Fecha seleccionada (fallback): {fecha}")
-                  return True
-              except Exception as e:
-                  print(f"  ⚠️  No se pudo seleccionar '{fecha}': {e}")
-                  return False
+                      pass
+              return {}
 
-          async def abrir_dropdown_agotado(page) -> bool:
-              for sel in [
-                  "text=Selecciona la función", "[class*='dropdown']",
-                  "[class*='select']", "[class*='arrow']",
-              ]:
-                  try:
-                      el = page.locator(sel).first
-                      if await el.is_visible(timeout=2000):
-                          await el.click()
-                          await asyncio.sleep(2)
-                          return True
-                  except Exception:
-                      continue
-              try:
-                  await page.get_by_text("Selecciona", exact=False).first.click()
-                  await asyncio.sleep(2)
-                  return True
-              except Exception:
-                  pass
-              return False
+          def guardar_estado(data):
+              with open("estado_pm.json", "w") as f:
+                  json.dump(data, f)
 
-          async def obtener_sectores(url: str, fecha_agotado, fecha_selector) -> list:
-              from playwright.async_api import async_playwright
-              sectores = []
+          async def verificar_pacifico_medio() -> dict:
+              """
+              Retorna:
+                {"disponible": False}              → Pacífico Medio no aparece
+                {"disponible": True, "dos": False} → aparece pero solo 1 entrada
+                {"disponible": True, "dos": True}  → aparecen 2 entradas juntas
+              """
+              result = {"disponible": False, "dos": False, "detalle": ""}
+
               async with async_playwright() as pw:
                   browser = await pw.chromium.launch(
                       headless=True,
@@ -195,221 +92,243 @@ jobs:
                       locale="es-CL", timezone_id="America/Santiago",
                       viewport={"width": 1440, "height": 900})
                   page = await ctx.new_page()
+
                   try:
-                      await page.goto(url, wait_until="networkidle", timeout=28000)
-                  except Exception:
+                      print(f"  → Navegando a {URL_EVENTO}")
                       try:
-                          await page.goto(url, wait_until="domcontentloaded", timeout=28000)
-                      except Exception as e:
-                          print(f"  ⚠️  Goto falló: {e}")
-                  await asyncio.sleep(5)
-                  try:
-                      if fecha_agotado:
-                          await abrir_dropdown_agotado(page)
-                          texto       = await page.inner_text("body")
-                          texto_lower = texto.lower()
-                          fecha_lower = fecha_agotado.lower()
-                          print(f"  Buscando fecha: '{fecha_agotado}'")
-                          if fecha_lower in texto_lower:
-                              idx      = texto_lower.find(fecha_lower)
-                              contexto = texto_lower[max(0, idx-80):idx+80]
-                              print(f"  Contexto: ...{contexto.strip()}...")
-                              if "agotado" in contexto:
-                                  print(f"  🔴 {fecha_agotado} sigue agotado")
-                              else:
-                                  print(f"  🟢 {fecha_agotado} → DISPONIBLE — leyendo sectores...")
-                                  # Seleccionar la fecha y leer el panel de sectores
-                                  await seleccionar_fecha(page, fecha_agotado)
-                                  texto2  = await page.inner_text("body")
-                                  lineas2 = [l.strip() for l in texto2.splitlines() if l.strip()]
-                                  print(f"  Líneas tras seleccionar fecha: {len(lineas2)}")
-                                  sectores_encontrados = []
-                                  for i, linea in enumerate(lineas2):
-                                      ll = linea.lower().replace(" ", "")
-                                      if "desde$" in ll and any(c.isdigit() for c in linea):
-                                          if i > 0:
-                                              nombre = lineas2[i-1].strip()
-                                              if (2 < len(nombre) < 70
-                                                      and not nombre.lower().startswith("desde")
-                                                      and not nombre.startswith("$")):
-                                                  sectores_encontrados.append(nombre)
-                                                  print(f"  ✅ Sector: '{nombre}'")
-                                  if sectores_encontrados:
-                                      sectores.extend(sectores_encontrados)
-                                  else:
-                                      # No encontró sectores — fecha disponible pero sin panel legible
-                                      sectores.append(f"Fecha habilitada: {fecha_agotado} (sin sectores visibles)")
-                          else:
-                              print(f"  ⚠️  No se encontró '{fecha_agotado}'")
+                          await page.goto(URL_EVENTO, wait_until="networkidle", timeout=30_000)
+                      except Exception:
+                          await page.goto(URL_EVENTO, wait_until="domcontentloaded", timeout=30_000)
+                      await asyncio.sleep(5)
 
-                      elif fecha_selector:
-                          await seleccionar_fecha(page, fecha_selector)
-                          texto  = await page.inner_text("body")
-                          lineas = [l.strip() for l in texto.splitlines() if l.strip()]
-                          print(f"  Página cargada: {len(lineas)} líneas")
-                          for i, linea in enumerate(lineas):
-                              ll = linea.lower().replace(" ", "")
-                              if "desde$" in ll and any(c.isdigit() for c in linea):
-                                  if i > 0:
-                                      nombre = lineas[i-1].strip()
-                                      if (2 < len(nombre) < 70
-                                              and not nombre.lower().startswith("desde")
-                                              and not nombre.startswith("$")):
-                                          sectores.append(nombre)
-                                          print(f"  ✅ Sector: '{nombre}'")
+                      # ── Paso 1: Seleccionar fecha 31/10/2026 ──────────────────
+                      print(f"  🗓  Seleccionando {FECHA}...")
+                      clicked_date = False
+                      for sel in ["text=Selecciona la función", "[class*='dropdown']",
+                                  "[class*='select']", "[class*='arrow']"]:
+                          try:
+                              el = page.locator(sel).first
+                              if await el.is_visible(timeout=2000):
+                                  await el.click()
+                                  await asyncio.sleep(2)
+                                  break
+                          except Exception:
+                              continue
 
+                      for sel in [f"text={FECHA}", f"li:has-text('{FECHA}')",
+                                  f"[class*='option']:has-text('{FECHA}')"]:
+                          try:
+                              el = page.locator(sel).first
+                              if await el.is_visible(timeout=2000):
+                                  await el.click()
+                                  await asyncio.sleep(4)
+                                  clicked_date = True
+                                  print(f"  ✅ Fecha seleccionada")
+                                  break
+                          except Exception:
+                              continue
+
+                      if not clicked_date:
+                          try:
+                              await page.get_by_text(FECHA, exact=False).first.click()
+                              await asyncio.sleep(4)
+                              clicked_date = True
+                              print("  ✅ Fecha seleccionada (fallback)")
+                          except Exception as e:
+                              print(f"  ⚠️  No pude seleccionar fecha: {e}")
+
+                      await asyncio.sleep(2)
+
+                      # ── Paso 2: Verificar que Pacífico Medio existe en la página ─
+                      texto = await page.inner_text("body")
+                      texto_lower = texto.lower()
+                      if "pacífico medio" not in texto_lower and "pacifico medio" not in texto_lower:
+                          print("  🔴 Pacífico Medio NO aparece en la página")
+                          result["disponible"] = False
+                          result["detalle"] = "No aparece"
+                          await browser.close()
+                          return result
+
+                      print("  🟢 Pacífico Medio detectado en página")
+                      result["disponible"] = True
+
+                      # ── Paso 3: Hacer clic en Pacífico Medio ────────────────────
+                      clicked_pm = False
+                      for sel in [
+                          "text=Pacífico Medio",
+                          "[class*='sector']:has-text('Pacífico Medio')",
+                          "[class*='location']:has-text('Pacífico Medio')",
+                          "td:has-text('Pacífico Medio')",
+                          "tr:has-text('Pacífico Medio')",
+                      ]:
+                          try:
+                              el = page.locator(sel).first
+                              if await el.is_visible(timeout=3000):
+                                  await el.click()
+                                  await asyncio.sleep(3)
+                                  clicked_pm = True
+                                  print("  ✅ Click en Pacífico Medio")
+                                  break
+                          except Exception:
+                              continue
+
+                      if not clicked_pm:
+                          try:
+                              await page.get_by_text("Pacífico Medio", exact=False).first.click()
+                              await asyncio.sleep(3)
+                              clicked_pm = True
+                              print("  ✅ Click Pacífico Medio (fallback)")
+                          except Exception as e:
+                              print(f"  ⚠️  No pude hacer click en Pacífico Medio: {e}")
+                              # Intentar "Ver entradas" como alternativa
+                              try:
+                                  btn = page.locator("text=Ver entradas").first
+                                  if await btn.is_visible(timeout=2000):
+                                      await btn.click()
+                                      await asyncio.sleep(3)
+                                      clicked_pm = True
+                                      print("  ✅ Click 'Ver entradas'")
+                              except Exception:
+                                  pass
+
+                      await asyncio.sleep(2)
+
+                      # ── Paso 4: Intentar subir cantidad a 2 ─────────────────────
+                      # Buscar botón "+" para incrementar
+                      clicked_plus = False
+                      for sel in [
+                          "button[aria-label*='más']", "button[aria-label*='plus']",
+                          "button[aria-label*='+']", "button:has-text('+')",
+                          "[class*='increment']", "[class*='plus']", "[class*='add']",
+                      ]:
+                          try:
+                              el = page.locator(sel).first
+                              if await el.is_visible(timeout=2000):
+                                  await el.click()
+                                  await asyncio.sleep(2)
+                                  clicked_plus = True
+                                  print("  ✅ Click en '+'")
+                                  break
+                          except Exception:
+                              continue
+
+                      if not clicked_plus:
+                          # Buscar por texto "+"
+                          try:
+                              btns = page.locator("button")
+                              count = await btns.count()
+                              for i in range(count):
+                                  b = btns.nth(i)
+                                  txt = await b.inner_text()
+                                  if txt.strip() == "+":
+                                      await b.click()
+                                      await asyncio.sleep(2)
+                                      clicked_plus = True
+                                      print(f"  ✅ Click '+' (btn #{i})")
+                                      break
+                          except Exception as e:
+                              print(f"  ⚠️  No pude encontrar '+': {e}")
+
+                      await asyncio.sleep(2)
+
+                      # ── Paso 5: Verificar si apareció popup de límite ────────────
+                      texto_post = await page.inner_text("body")
+                      texto_post_lower = texto_post.lower()
+
+                      limite_msgs = [
+                          "máximo disponible",
+                          "limite de cantidad",
+                          "límite de cantidad",
+                          "has seleccionado el máximo",
+                          "no hay más entradas",
+                          "máximo de entradas",
+                      ]
+
+                      if any(m in texto_post_lower for m in limite_msgs):
+                          print("  ⚠️  Popup 'Límite de cantidad' detectado → solo 1 entrada")
+                          result["dos"] = False
+                          result["detalle"] = "Solo 1 disponible (límite de cantidad)"
                       else:
-                          texto  = await page.inner_text("body")
-                          lineas = [l.strip() for l in texto.splitlines() if l.strip()]
-                          print(f"  Página cargada: {len(lineas)} líneas")
-                          for i, linea in enumerate(lineas):
-                              ll = linea.lower().replace(" ", "")
-                              if "desde$" in ll and any(c.isdigit() for c in linea):
-                                  if i > 0:
-                                      nombre = lineas[i-1].strip()
-                                      if (2 < len(nombre) < 70
-                                              and not nombre.lower().startswith("desde")
-                                              and not nombre.startswith("$")):
-                                          sectores.append(nombre)
-                                          print(f"  ✅ Sector: '{nombre}'")
-                          if not sectores:
-                              texto_lower = texto.lower()
-                              if any(p in texto_lower for p in ["agotado", "sold out"]):
-                                  print("  🔴 Agotado — sin sectores")
-                              else:
-                                  print("  ⚠️  Sin sectores detectados")
+                          # Verificar si el contador llegó a 2
+                          # Buscar el número actual en el selector de cantidad
+                          qty_actual = None
+                          try:
+                              # Buscar input o texto que muestre la cantidad
+                              for sel in [
+                                  "[class*='quantity'] input",
+                                  "input[type='number']",
+                                  "[class*='counter']",
+                              ]:
+                                  try:
+                                      el = page.locator(sel).first
+                                      if await el.is_visible(timeout=1000):
+                                          val = await el.input_value()
+                                          if val.isdigit():
+                                              qty_actual = int(val)
+                                              break
+                                  except Exception:
+                                      continue
+                          except Exception:
+                              pass
+
+                          if qty_actual == 2:
+                              print("  🎉 Cantidad = 2 confirmada!")
+                              result["dos"] = True
+                              result["detalle"] = "2 entradas disponibles juntas"
+                          elif clicked_plus and qty_actual is None:
+                              # No hubo popup → asumimos que subió a 2
+                              print("  🎉 Sin popup de límite → asumimos 2 disponibles")
+                              result["dos"] = True
+                              result["detalle"] = "Sin popup de límite (posiblemente 2 disponibles)"
+                          else:
+                              print(f"  ⚠️  qty_actual={qty_actual}, clicked_plus={clicked_plus}")
+                              result["dos"] = False
+                              result["detalle"] = f"No confirmado (qty={qty_actual})"
 
                   except Exception as e:
-                      print(f"  ⚠️  Lectura falló: {e}")
+                      print(f"  ❌ Error: {e}")
+                      result["detalle"] = f"Error: {e}"
+
                   await browser.close()
-              return sectores
+              return result
 
-          def cargar_estado() -> dict:
-              if os.path.exists("estado_previo.json"):
-                  try:
-                      with open("estado_previo.json") as f:
-                          data = json.load(f)
-                          print(f"✅ Estado cargado: {list(data.keys())}")
-                          return data
-                  except Exception:
-                      pass
-              print("⚠️  Sin estado previo")
-              return {}
-
-          def guardar_estado(estado: dict):
-              with open("estado_previo.json", "w") as f:
-                  json.dump(estado, f, ensure_ascii=False, indent=2)
-
-          # ══════════════════════════════════════════════════════════════════════
+          # ══════════════════════════════════════════════════════════
           ahora_utc = datetime.now(timezone.utc)
           hora_scl  = ahora_utc - timedelta(hours=4)
 
           print("=" * 55)
-          print(f"  🎵 {ahora_utc.strftime('%Y-%m-%d %H:%M UTC')} ({hora_scl.strftime('%H:%M')} SCL)")
-          if SECTOR_PRUEBA:
-              print(f"  🧪 MODO PRUEBA — sector: '{SECTOR_PRUEBA}'")
+          print(f"  🤘 Pacífico Medio ×2 — {hora_scl.strftime('%H:%M')} Santiago")
           print("=" * 55)
 
-          estado_global = cargar_estado()
-          estado_nuevo  = {}
+          estado = cargar_estado()
+          estado_prev_disponible = estado.get("disponible")
+          estado_prev_dos        = estado.get("dos")
 
-          for evento in EVENTOS:
-              eid            = evento["id"]
-              nombre         = evento["nombre"]
-              url            = evento["url"]
-              fecha_agotado  = evento.get("fecha_agotado")
-              fecha_selector = evento.get("fecha_selector")
-              si_norm        = {normalizar(s) for s in evento["sectores_iniciales"]}
+          result = asyncio.run(verificar_pacifico_medio())
+          print(f"\n  Resultado: {result}")
 
-              print(f"\n{'─'*55}")
-              print(f"  {nombre}")
-              print(f"{'─'*55}")
+          # ── Lógica de alertas ──────────────────────────────────────
+          # Solo alertar cuando hay 2 entradas juntas disponibles
+          if result["disponible"] and result["dos"]:
+              send_telegram(
+                  f"🚨⭐ <b>¡Pacífico Medio × 2 DISPONIBLES!</b>\n\n"
+                  f"Hay 2 entradas juntas en Pacífico Medio 🎉\n\n"
+                  f"⚡ <b>COMPRA AHORA:</b>\n{URL_EVENTO}\n\n"
+                  f"🎫 ${160_000:,} c/u (precio base)\n"
+                  f"🕐 {hora_scl.strftime('%H:%M')} Santiago"
+              )
+              print("  🚨 ALERTA: 2 entradas juntas disponibles!")
+          else:
+              estado_txt = "solo 1" if result["disponible"] else "no disponible"
+              print(f"  ℹ️  Sin alerta ({estado_txt}) — esperando 2 juntas")
 
-              DESTACADOS = {
-                  "cancha general", "pacifico medio", "pacífico medio",
-                  "galeria norte", "galería norte",
-              }
-
-              ev_estado    = estado_global.get(eid, {})
-              es_baseline  = not ev_estado
-              # Estado guardado en nombres normalizados → comparación robusta
-              panel_prev_norm = set(ev_estado.get("sectores_norm", []))
-              # Mapa norm→original para reconstruir nombres bonitos al alertar
-              nombre_orig_prev = {n: n for n in ev_estado.get("sectores_panel", [])}
-              primer_check     = ev_estado.get("primer_check", ahora_utc.isoformat())
-
-              print(f"  baseline={es_baseline} | panel_prev={sorted(panel_prev_norm) or '(vacío)'}")
-
-              sectores_raw = asyncio.run(obtener_sectores(url, fecha_agotado, fecha_selector))
-
-              # Construir: lista de (nombre_original, nombre_normalizado)
-              sectores_pares = [(s, normalizar(s)) for s in sectores_raw]
-              # Mapa norm→original para esta corrida
-              norm_a_orig = {n: o for o, n in sectores_pares}
-
-              panel_ahora_norm = set(n for _, n in sectores_pares)
-
-              if SECTOR_PRUEBA:
-                  n_prueba = normalizar(SECTOR_PRUEBA)
-                  panel_ahora_norm.add(n_prueba)
-                  norm_a_orig[n_prueba] = SECTOR_PRUEBA
-                  print(f"  🧪 Inyectado: '{SECTOR_PRUEBA}'")
-
-              print(f"  Panel ahora: {sorted(panel_ahora_norm) or '(vacío)'}")
-
-              if es_baseline:
-                  print("  📌 Baseline guardado — próximo run detectará cambios")
-              else:
-                  nuevos_norm   = panel_ahora_norm - panel_prev_norm
-                  perdidos_norm = panel_prev_norm  - panel_ahora_norm
-
-                  # Filtrar los que ya estaban en sectores_iniciales
-                  a_alertar_norm = {n for n in nuevos_norm if n not in si_norm}
-
-                  print(f"  A alertar: {sorted(a_alertar_norm) or 'ninguno'}")
-
-                  if a_alertar_norm:
-                      prueba_tag = " <i>(PRUEBA)</i>" if SECTOR_PRUEBA else ""
-                      def _fmt(n_norm):
-                          orig = norm_a_orig.get(n_norm, n_norm)
-                          prefix = "⭐ " if any(d in n_norm for d in DESTACADOS) else "🎟 "
-                          return f"  {prefix}<b>{orig}</b>"
-                      lista = "\n".join(_fmt(n) for n in sorted(a_alertar_norm))
-                      send_telegram(
-                          f"🚨 <b>¡Disponible!{prueba_tag}</b>\n"
-                          f"<b>{nombre}</b>\n\n"
-                          f"{lista}\n\n"
-                          f"⚡ Compra AHORA:\n{url}\n\n"
-                          f"🕐 {hora_scl.strftime('%H:%M')} Santiago"
-                      )
-                      print("  🚨 ALERTA enviada.")
-                  else:
-                      print("  ✅ Sin cambios.")
-
-                  if perdidos_norm:
-                      print(f"  ℹ️  Perdidos (sin alerta): {sorted(perdidos_norm)}")
-
-              # Guardar estado con nombres normalizados (para comparación robusta)
-              # y originales (para mensajes legibles)
-              if fecha_agotado:
-                  norm_guardar = panel_ahora_norm
-                  orig_guardar = [norm_a_orig.get(n, n) for n in norm_guardar]
-              else:
-                  if sectores_raw:
-                      norm_guardar = panel_ahora_norm
-                      orig_guardar = [norm_a_orig.get(n, n) for n in norm_guardar]
-                  else:
-                      norm_guardar = panel_prev_norm
-                      orig_guardar = list(nombre_orig_prev.values())
-
-              estado_nuevo[eid] = {
-                  "sectores_panel": orig_guardar,
-                  "sectores_norm":  list(norm_guardar),
-                  "primer_check":   primer_check,
-                  "ultimo_check":   ahora_utc.isoformat(),
-              }
-
-          guardar_estado(estado_nuevo)
+          # Guardar estado
+          guardar_estado({
+              "disponible": result["disponible"],
+              "dos":        result["dos"],
+              "detalle":    result["detalle"],
+              "ultimo_check": ahora_utc.isoformat(),
+          })
           print(f"\n{'='*55}\n  ✅ Listo.\n{'='*55}")
           PYEOF
 
@@ -417,5 +336,5 @@ jobs:
         uses: actions/cache/save@v4
         if: always()
         with:
-          path: estado_previo.json
-          key: tm-estado2-${{ github.run_id }}
+          path: estado_pm.json
+          key: pm-estado-${{ github.run_id }}
