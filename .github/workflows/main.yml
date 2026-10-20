@@ -87,6 +87,8 @@ jobs:
                   "fecha_agotado":    None,
                   "fecha_selector":   None,
                   "sectores_iniciales": set(),
+                  # Solo alertar cuando aparezcan estos sectores específicos
+                  "sectores_objetivo": {"platea oriente", "platea poniente", "platea central"},
               },
               {
                   "id":               "bts_17oct",
@@ -380,6 +382,9 @@ jobs:
               # Mapa norm→original para reconstruir nombres bonitos al alertar
               nombre_orig_prev = {n: n for n in ev_estado.get("sectores_panel", [])}
               primer_check     = ev_estado.get("primer_check", ahora_utc.isoformat())
+              # sectores_objetivo: si está definido, solo alertamos por esos sectores
+              sectores_obj_raw = evento.get("sectores_objetivo")
+              si_obj_norm      = {normalizar(s) for s in sectores_obj_raw} if sectores_obj_raw else None
 
               print(f"  baseline={es_baseline} | panel_prev={sorted(panel_prev_norm) or '(vacío)'}")
 
@@ -408,6 +413,13 @@ jobs:
 
                   # Filtrar los que ya estaban en sectores_iniciales
                   a_alertar_norm = {n for n in nuevos_norm if n not in si_norm}
+                  # Si hay sectores_objetivo, solo alertar por esos
+                  if si_obj_norm is not None:
+                      a_alertar_norm = {n for n in a_alertar_norm if n in si_obj_norm}
+                      # También alertar si un objetivo aparece por primera vez (aunque sea baseline)
+                      if es_baseline:
+                          a_alertar_norm = {n for n in panel_ahora_norm if n in si_obj_norm}
+                          es_baseline = False  # forzar evaluación de alerta
 
                   print(f"  A alertar: {sorted(a_alertar_norm) or 'ninguno'}")
 
