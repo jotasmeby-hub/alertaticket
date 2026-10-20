@@ -1,0 +1,340 @@
+name: 🤘 Iron Maiden — Pacífico Medio × 2
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"   # cada 5 minutos
+
+  workflow_dispatch: {}
+
+jobs:
+  check-pacifico-medio:
+    name: Verificar 2 entradas Pacífico Medio
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: 📂 Restaurar estado previo
+        uses: actions/cache/restore@v4
+        with:
+          path: estado_pm.json
+          key: pm-estado-${{ github.run_id }}
+          restore-keys: pm-estado-
+
+      - name: 🐍 Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 📦 Instalar dependencias
+        run: |
+          pip install playwright requests --break-system-packages 2>/dev/null || pip install playwright requests
+          playwright install chromium --with-deps
+
+      - name: 🔍 Chequear Pacífico Medio ×2
+        env:
+          TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python - <<'PYEOF'
+          import os, json, asyncio, requests
+          from datetime import datetime, timezone, timedelta
+          from playwright.async_api import async_playwright
+
+          TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
+          TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+          URL_EVENTO = "https://www.ticketmaster.cl/event/iron-maiden-run-for-your-lives-scl-2026-venta-general"
+          FECHA      = "31/10/2026"
+
+          def send_telegram(msg: str):
+              if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+                  print("  ⚠️  Sin credenciales Telegram")
+                  return
+              try:
+                  r = requests.post(
+                      f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                      json={"chat_id": TELEGRAM_CHAT_ID, "text": msg,
+                            "parse_mode": "HTML", "disable_web_page_preview": True},
+                      timeout=10)
+                  r.raise_for_status()
+                  print("  ✅ Telegram OK")
+              except Exception as e:
+                  print(f"  ❌ Telegram error: {e}")
+
+          def cargar_estado():
+              if os.path.exists("estado_pm.json"):
+                  try:
+                      with open("estado_pm.json") as f:
+                          return json.load(f)
+                  except Exception:
+                      pass
+              return {}
+
+          def guardar_estado(data):
+              with open("estado_pm.json", "w") as f:
+                  json.dump(data, f)
+
+          async def verificar_pacifico_medio() -> dict:
+              """
+              Retorna:
+                {"disponible": False}              → Pacífico Medio no aparece
+                {"disponible": True, "dos": False} → aparece pero solo 1 entrada
+                {"disponible": True, "dos": True}  → aparecen 2 entradas juntas
+              """
+              result = {"disponible": False, "dos": False, "detalle": ""}
+
+              async with async_playwright() as pw:
+                  browser = await pw.chromium.launch(
+                      headless=True,
+                      args=["--no-sandbox", "--disable-dev-shm-usage"])
+                  ctx = await browser.new_context(
+                      user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                                 "Chrome/124.0.0.0 Safari/537.36",
+                      locale="es-CL", timezone_id="America/Santiago",
+                      viewport={"width": 1440, "height": 900})
+                  page = await ctx.new_page()
+
+                  try:
+                      print(f"  → Navegando a {URL_EVENTO}")
+                      try:
+                          await page.goto(URL_EVENTO, wait_until="networkidle", timeout=30_000)
+                      except Exception:
+                          await page.goto(URL_EVENTO, wait_until="domcontentloaded", timeout=30_000)
+                      await asyncio.sleep(5)
+
+                      # ── Paso 1: Seleccionar fecha 31/10/2026 ──────────────────
+                      print(f"  🗓  Seleccionando {FECHA}...")
+                      clicked_date = False
+                      for sel in ["text=Selecciona la función", "[class*='dropdown']",
+                                  "[class*='select']", "[class*='arrow']"]:
+                          try:
+                              el = page.locator(sel).first
+                              if await el.is_visible(timeout=2000):
+                                  await el.click()
+                                  await asyncio.sleep(2)
+                                  break
+                          except Exception:
+                              continue
+
+                      for sel in [f"text={FECHA}", f"li:has-text('{FECHA}')",
+                                  f"[class*='option']:has-text('{FECHA}')"]:
+                          try:
+                              el = page.locator(sel).first
+                              if await el.is_visible(timeout=2000):
+                                  await el.click()
+                                  await asyncio.sleep(4)
+                                  clicked_date = True
+                                  print(f"  ✅ Fecha seleccionada")
+                                  break
+                          except Exception:
+                              continue
+
+                      if not clicked_date:
+                          try:
+                              await page.get_by_text(FECHA, exact=False).first.click()
+                              await asyncio.sleep(4)
+                              clicked_date = True
+                              print("  ✅ Fecha seleccionada (fallback)")
+                          except Exception as e:
+                              print(f"  ⚠️  No pude seleccionar fecha: {e}")
+
+                      await asyncio.sleep(2)
+
+                      # ── Paso 2: Verificar que Pacífico Medio existe en la página ─
+                      texto = await page.inner_text("body")
+                      texto_lower = texto.lower()
+                      if "pacífico medio" not in texto_lower and "pacifico medio" not in texto_lower:
+                          print("  🔴 Pacífico Medio NO aparece en la página")
+                          result["disponible"] = False
+                          result["detalle"] = "No aparece"
+                          await browser.close()
+                          return result
+
+                      print("  🟢 Pacífico Medio detectado en página")
+                      result["disponible"] = True
+
+                      # ── Paso 3: Hacer clic en Pacífico Medio ────────────────────
+                      clicked_pm = False
+                      for sel in [
+                          "text=Pacífico Medio",
+                          "[class*='sector']:has-text('Pacífico Medio')",
+                          "[class*='location']:has-text('Pacífico Medio')",
+                          "td:has-text('Pacífico Medio')",
+                          "tr:has-text('Pacífico Medio')",
+                      ]:
+                          try:
+                              el = page.locator(sel).first
+                              if await el.is_visible(timeout=3000):
+                                  await el.click()
+                                  await asyncio.sleep(3)
+                                  clicked_pm = True
+                                  print("  ✅ Click en Pacífico Medio")
+                                  break
+                          except Exception:
+                              continue
+
+                      if not clicked_pm:
+                          try:
+                              await page.get_by_text("Pacífico Medio", exact=False).first.click()
+                              await asyncio.sleep(3)
+                              clicked_pm = True
+                              print("  ✅ Click Pacífico Medio (fallback)")
+                          except Exception as e:
+                              print(f"  ⚠️  No pude hacer click en Pacífico Medio: {e}")
+                              # Intentar "Ver entradas" como alternativa
+                              try:
+                                  btn = page.locator("text=Ver entradas").first
+                                  if await btn.is_visible(timeout=2000):
+                                      await btn.click()
+                                      await asyncio.sleep(3)
+                                      clicked_pm = True
+                                      print("  ✅ Click 'Ver entradas'")
+                              except Exception:
+                                  pass
+
+                      await asyncio.sleep(2)
+
+                      # ── Paso 4: Intentar subir cantidad a 2 ─────────────────────
+                      # Buscar botón "+" para incrementar
+                      clicked_plus = False
+                      for sel in [
+                          "button[aria-label*='más']", "button[aria-label*='plus']",
+                          "button[aria-label*='+']", "button:has-text('+')",
+                          "[class*='increment']", "[class*='plus']", "[class*='add']",
+                      ]:
+                          try:
+                              el = page.locator(sel).first
+                              if await el.is_visible(timeout=2000):
+                                  await el.click()
+                                  await asyncio.sleep(2)
+                                  clicked_plus = True
+                                  print("  ✅ Click en '+'")
+                                  break
+                          except Exception:
+                              continue
+
+                      if not clicked_plus:
+                          # Buscar por texto "+"
+                          try:
+                              btns = page.locator("button")
+                              count = await btns.count()
+                              for i in range(count):
+                                  b = btns.nth(i)
+                                  txt = await b.inner_text()
+                                  if txt.strip() == "+":
+                                      await b.click()
+                                      await asyncio.sleep(2)
+                                      clicked_plus = True
+                                      print(f"  ✅ Click '+' (btn #{i})")
+                                      break
+                          except Exception as e:
+                              print(f"  ⚠️  No pude encontrar '+': {e}")
+
+                      await asyncio.sleep(2)
+
+                      # ── Paso 5: Verificar si apareció popup de límite ────────────
+                      texto_post = await page.inner_text("body")
+                      texto_post_lower = texto_post.lower()
+
+                      limite_msgs = [
+                          "máximo disponible",
+                          "limite de cantidad",
+                          "límite de cantidad",
+                          "has seleccionado el máximo",
+                          "no hay más entradas",
+                          "máximo de entradas",
+                      ]
+
+                      if any(m in texto_post_lower for m in limite_msgs):
+                          print("  ⚠️  Popup 'Límite de cantidad' detectado → solo 1 entrada")
+                          result["dos"] = False
+                          result["detalle"] = "Solo 1 disponible (límite de cantidad)"
+                      else:
+                          # Verificar si el contador llegó a 2
+                          # Buscar el número actual en el selector de cantidad
+                          qty_actual = None
+                          try:
+                              # Buscar input o texto que muestre la cantidad
+                              for sel in [
+                                  "[class*='quantity'] input",
+                                  "input[type='number']",
+                                  "[class*='counter']",
+                              ]:
+                                  try:
+                                      el = page.locator(sel).first
+                                      if await el.is_visible(timeout=1000):
+                                          val = await el.input_value()
+                                          if val.isdigit():
+                                              qty_actual = int(val)
+                                              break
+                                  except Exception:
+                                      continue
+                          except Exception:
+                              pass
+
+                          if qty_actual == 2:
+                              print("  🎉 Cantidad = 2 confirmada!")
+                              result["dos"] = True
+                              result["detalle"] = "2 entradas disponibles juntas"
+                          elif clicked_plus and qty_actual is None:
+                              # No hubo popup → asumimos que subió a 2
+                              print("  🎉 Sin popup de límite → asumimos 2 disponibles")
+                              result["dos"] = True
+                              result["detalle"] = "Sin popup de límite (posiblemente 2 disponibles)"
+                          else:
+                              print(f"  ⚠️  qty_actual={qty_actual}, clicked_plus={clicked_plus}")
+                              result["dos"] = False
+                              result["detalle"] = f"No confirmado (qty={qty_actual})"
+
+                  except Exception as e:
+                      print(f"  ❌ Error: {e}")
+                      result["detalle"] = f"Error: {e}"
+
+                  await browser.close()
+              return result
+
+          # ══════════════════════════════════════════════════════════
+          ahora_utc = datetime.now(timezone.utc)
+          hora_scl  = ahora_utc - timedelta(hours=4)
+
+          print("=" * 55)
+          print(f"  🤘 Pacífico Medio ×2 — {hora_scl.strftime('%H:%M')} Santiago")
+          print("=" * 55)
+
+          estado = cargar_estado()
+          estado_prev_disponible = estado.get("disponible")
+          estado_prev_dos        = estado.get("dos")
+
+          result = asyncio.run(verificar_pacifico_medio())
+          print(f"\n  Resultado: {result}")
+
+          # ── Lógica de alertas ──────────────────────────────────────
+          # Solo alertar cuando hay 2 entradas juntas disponibles
+          if result["disponible"] and result["dos"]:
+              send_telegram(
+                  f"🚨⭐ <b>¡Pacífico Medio × 2 DISPONIBLES!</b>\n\n"
+                  f"Hay 2 entradas juntas en Pacífico Medio 🎉\n\n"
+                  f"⚡ <b>COMPRA AHORA:</b>\n{URL_EVENTO}\n\n"
+                  f"🎫 ${160_000:,} c/u (precio base)\n"
+                  f"🕐 {hora_scl.strftime('%H:%M')} Santiago"
+              )
+              print("  🚨 ALERTA: 2 entradas juntas disponibles!")
+          else:
+              estado_txt = "solo 1" if result["disponible"] else "no disponible"
+              print(f"  ℹ️  Sin alerta ({estado_txt}) — esperando 2 juntas")
+
+          # Guardar estado
+          guardar_estado({
+              "disponible": result["disponible"],
+              "dos":        result["dos"],
+              "detalle":    result["detalle"],
+              "ultimo_check": ahora_utc.isoformat(),
+          })
+          print(f"\n{'='*55}\n  ✅ Listo.\n{'='*55}")
+          PYEOF
+
+      - name: 💾 Guardar estado
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: estado_pm.json
+          key: pm-estado-${{ github.run_id }}
