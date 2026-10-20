@@ -234,20 +234,10 @@ jobs:
                                                       and not nombre.startswith("$")):
                                                   sectores_encontrados.append(nombre)
                                                   print(f"  ✅ Sector: '{nombre}'")
-                                  DESTACADOS_GLOBAL = {
-                                      "cancha general", "pacifico medio", "pacífico medio",
-                                      "galeria norte", "galería norte",
-                                  }
                                   if sectores_encontrados:
-                                      # Destacar sectores de interés
-                                      for s in sectores_encontrados:
-                                          sl = s.lower()
-                                          if any(d in sl for d in DESTACADOS_GLOBAL):
-                                              sectores.append(f"⭐ {s}")
-                                          else:
-                                              sectores.append(s)
+                                      sectores.extend(sectores_encontrados)
                                   else:
-                                      # No encontró sectores con "Desde $" — fecha disponible pero sin panel legible
+                                      # No encontró sectores — fecha disponible pero sin panel legible
                                       sectores.append(f"Fecha habilitada: {fecha_agotado} (sin sectores visibles)")
                           else:
                               print(f"  ⚠️  No se encontró '{fecha_agotado}'")
@@ -269,10 +259,6 @@ jobs:
                                           print(f"  ✅ Sector: '{nombre}'")
 
                       else:
-                          DESTACADOS_GLOBAL = {
-                              "cancha general", "pacifico medio", "pacífico medio",
-                              "galeria norte", "galería norte",
-                          }
                           texto  = await page.inner_text("body")
                           lineas = [l.strip() for l in texto.splitlines() if l.strip()]
                           print(f"  Página cargada: {len(lineas)} líneas")
@@ -284,11 +270,7 @@ jobs:
                                       if (2 < len(nombre) < 70
                                               and not nombre.lower().startswith("desde")
                                               and not nombre.startswith("$")):
-                                          nl = nombre.lower()
-                                          if any(d in nl for d in DESTACADOS_GLOBAL):
-                                              sectores.append(f"⭐ {nombre}")
-                                          else:
-                                              sectores.append(nombre)
+                                          sectores.append(nombre)
                                           print(f"  ✅ Sector: '{nombre}'")
                           if not sectores:
                               texto_lower = texto.lower()
@@ -343,37 +325,56 @@ jobs:
               print(f"  {nombre}")
               print(f"{'─'*55}")
 
+              DESTACADOS = {
+                  "cancha general", "pacifico medio", "pacífico medio",
+                  "galeria norte", "galería norte",
+              }
+
               ev_estado    = estado_global.get(eid, {})
               es_baseline  = not ev_estado
-              panel_prev   = set(ev_estado.get("sectores_panel", []))
-              primer_check = ev_estado.get("primer_check", ahora_utc.isoformat())
+              # Estado guardado en nombres normalizados → comparación robusta
+              panel_prev_norm = set(ev_estado.get("sectores_norm", []))
+              # Mapa norm→original para reconstruir nombres bonitos al alertar
+              nombre_orig_prev = {n: n for n in ev_estado.get("sectores_panel", [])}
+              primer_check     = ev_estado.get("primer_check", ahora_utc.isoformat())
 
-              print(f"  baseline={es_baseline} | panel_prev={sorted(panel_prev) or '(vacío)'}")
+              print(f"  baseline={es_baseline} | panel_prev={sorted(panel_prev_norm) or '(vacío)'}")
 
-              sectores    = asyncio.run(obtener_sectores(url, fecha_agotado, fecha_selector))
-              panel_ahora = set(sectores)
+              sectores_raw = asyncio.run(obtener_sectores(url, fecha_agotado, fecha_selector))
+
+              # Construir: lista de (nombre_original, nombre_normalizado)
+              sectores_pares = [(s, normalizar(s)) for s in sectores_raw]
+              # Mapa norm→original para esta corrida
+              norm_a_orig = {n: o for o, n in sectores_pares}
+
+              panel_ahora_norm = set(n for _, n in sectores_pares)
 
               if SECTOR_PRUEBA:
-                  panel_ahora.add(SECTOR_PRUEBA)
+                  n_prueba = normalizar(SECTOR_PRUEBA)
+                  panel_ahora_norm.add(n_prueba)
+                  norm_a_orig[n_prueba] = SECTOR_PRUEBA
                   print(f"  🧪 Inyectado: '{SECTOR_PRUEBA}'")
 
-              print(f"  Panel ahora: {sorted(panel_ahora) or '(vacío)'}")
+              print(f"  Panel ahora: {sorted(panel_ahora_norm) or '(vacío)'}")
 
               if es_baseline:
                   print("  📌 Baseline guardado — próximo run detectará cambios")
               else:
-                  sectores_nuevos    = panel_ahora - panel_prev
-                  sectores_perdidos  = panel_prev  - panel_ahora
-                  sectores_a_alertar = {
-                      s for s in sectores_nuevos
-                      if normalizar(s) not in si_norm
-                  }
+                  nuevos_norm   = panel_ahora_norm - panel_prev_norm
+                  perdidos_norm = panel_prev_norm  - panel_ahora_norm
 
-                  print(f"  A alertar: {sorted(sectores_a_alertar) or 'ninguno'}")
+                  # Filtrar los que ya estaban en sectores_iniciales
+                  a_alertar_norm = {n for n in nuevos_norm if n not in si_norm}
 
-                  if sectores_a_alertar:
+                  print(f"  A alertar: {sorted(a_alertar_norm) or 'ninguno'}")
+
+                  if a_alertar_norm:
                       prueba_tag = " <i>(PRUEBA)</i>" if SECTOR_PRUEBA else ""
-                      lista = "\n".join(f"  🎟 <b>{s}</b>" for s in sorted(sectores_a_alertar))
+                      def _fmt(n_norm):
+                          orig = norm_a_orig.get(n_norm, n_norm)
+                          prefix = "⭐ " if any(d in n_norm for d in DESTACADOS) else "🎟 "
+                          return f"  {prefix}<b>{orig}</b>"
+                      lista = "\n".join(_fmt(n) for n in sorted(a_alertar_norm))
                       send_telegram(
                           f"🚨 <b>¡Disponible!{prueba_tag}</b>\n"
                           f"<b>{nombre}</b>\n\n"
@@ -385,18 +386,25 @@ jobs:
                   else:
                       print("  ✅ Sin cambios.")
 
-                  # No alertar cuando sectores desaparecen (falsos positivos por carga de página)
-                  if sectores_perdidos:
-                      print(f"  ℹ️  Perdidos (sin alerta): {sorted(sectores_perdidos)}")
+                  if perdidos_norm:
+                      print(f"  ℹ️  Perdidos (sin alerta): {sorted(perdidos_norm)}")
 
-              # Para eventos fecha_agotado: siempre guardar estado actual
+              # Guardar estado con nombres normalizados (para comparación robusta)
+              # y originales (para mensajes legibles)
               if fecha_agotado:
-                  panel_a_guardar = panel_ahora
+                  norm_guardar = panel_ahora_norm
+                  orig_guardar = [norm_a_orig.get(n, n) for n in norm_guardar]
               else:
-                  panel_a_guardar = set(sectores) if sectores else panel_prev
+                  if sectores_raw:
+                      norm_guardar = panel_ahora_norm
+                      orig_guardar = [norm_a_orig.get(n, n) for n in norm_guardar]
+                  else:
+                      norm_guardar = panel_prev_norm
+                      orig_guardar = list(nombre_orig_prev.values())
 
               estado_nuevo[eid] = {
-                  "sectores_panel": list(panel_a_guardar),
+                  "sectores_panel": orig_guardar,
+                  "sectores_norm":  list(norm_guardar),
                   "primer_check":   primer_check,
                   "ultimo_check":   ahora_utc.isoformat(),
               }
