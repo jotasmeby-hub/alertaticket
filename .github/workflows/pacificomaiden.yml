@@ -26,7 +26,7 @@ jobs:
           python-version: "3.12"
 
       - name: 📦 Instalar dependencias
-        run: pip install requests --break-system-packages 2>/dev/null || pip install requests
+        run: pip install requests cloudscraper --break-system-packages 2>/dev/null || pip install requests cloudscraper
 
       - name: 🔍 Chequear Pacífico Medio ×2
         env:
@@ -41,15 +41,37 @@ jobs:
           TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
           URL_EVENTO = "https://www.ticketmaster.cl/event/iron-maiden-run-for-your-lives-scl-2026-venta-general"
 
-          HEADERS = {
-              "User-Agent": (
-                  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                  "AppleWebKit/537.36 (KHTML, like Gecko) "
-                  "Chrome/124.0.0.0 Safari/537.36"
-              ),
-              "Accept-Language": "es-CL,es;q=0.9",
-              "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-          }
+          def get_html(url):
+              """Intenta descargar el HTML con cloudscraper (bypass Cloudflare), fallback a requests."""
+              # Intento 1: cloudscraper
+              try:
+                  import cloudscraper
+                  scraper = cloudscraper.create_scraper(
+                      browser={"browser": "chrome", "platform": "windows", "mobile": False}
+                  )
+                  resp = scraper.get(url, timeout=30)
+                  print(f"  cloudscraper: status={resp.status_code}, largo={len(resp.text)}")
+                  if resp.status_code == 200 and len(resp.text) > 50000:
+                      return resp.text, resp.status_code
+                  print(f"  cloudscraper insuficiente, intentando requests...")
+              except Exception as e:
+                  print(f"  cloudscraper error: {e}")
+
+              # Intento 2: requests con headers de browser
+              headers = {
+                  "User-Agent": (
+                      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) "
+                      "Chrome/124.0.0.0 Safari/537.36"
+                  ),
+                  "Accept-Language": "es-CL,es;q=0.9",
+                  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                  "Accept-Encoding": "gzip, deflate, br",
+                  "Connection": "keep-alive",
+                  "Upgrade-Insecure-Requests": "1",
+              }
+              resp = requests.get(url, headers=headers, timeout=30)
+              return resp.text, resp.status_code
 
           def send_telegram(msg):
               if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
@@ -128,19 +150,18 @@ jobs:
           # PASO 1: Descargar HTML
           print("PASO 1: Descargando pagina...")
           try:
-              resp = requests.get(URL_EVENTO, headers=HEADERS, timeout=30)
-              html = resp.text
-              print(f"PASO 1: OK — {len(html)} chars (status {resp.status_code})")
+              html, status = get_html(URL_EVENTO)
+              print(f"PASO 1: OK — {len(html)} chars (status {status})")
           except Exception as e:
               print(f"PASO 1: ERROR — {e}")
               guardar_estado({"error": str(e), "ultimo_check": ahora_utc.isoformat()})
               exit(0)
 
-          # Verificar que tenemos contenido real (no una pagina de error)
+          # Verificar que tenemos contenido real (no una pagina de error/challenge)
           if len(html) < 50000:
               print(f"PASO 1: ADVERTENCIA — HTML demasiado corto ({len(html)} chars), posible bloqueo")
               print(f"  Fragmento: {html[:300]}")
-              guardar_estado({"error": "HTML corto", "largo": len(html), "ultimo_check": ahora_utc.isoformat()})
+              guardar_estado({"error": "HTML corto (bloqueado)", "largo": len(html), "ultimo_check": ahora_utc.isoformat()})
               exit(0)
 
           # PASO 2: Buscar sector Pacifico Medio
