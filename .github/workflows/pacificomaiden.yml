@@ -1,4 +1,4 @@
-name: 🤘 Iron Maiden — Pacífico Medio × 2
+name: 🤘 Foo Fighters — Cambios de Sectores
 
 on:
   schedule:
@@ -7,8 +7,8 @@ on:
   workflow_dispatch: {}
 
 jobs:
-  check-pacifico-medio:
-    name: Verificar 2 entradas Pacífico Medio
+  check-foofighters:
+    name: Verificar sectores Foo Fighters
     runs-on: ubuntu-latest
     timeout-minutes: 4
 
@@ -16,9 +16,9 @@ jobs:
       - name: 📂 Restaurar estado previo
         uses: actions/cache/restore@v4
         with:
-          path: estado_pm.json
-          key: pm-estado-${{ github.run_id }}
-          restore-keys: pm-estado-
+          path: estado_ff.json
+          key: ff-estado-${{ github.run_id }}
+          restore-keys: ff-estado-
 
       - name: 🐍 Configurar Python
         uses: actions/setup-python@v5
@@ -26,51 +26,31 @@ jobs:
           python-version: "3.12"
 
       - name: 📦 Instalar dependencias
-        run: pip install requests cloudscraper --break-system-packages 2>/dev/null || pip install requests cloudscraper
+        run: pip install requests --break-system-packages 2>/dev/null || pip install requests
 
-      - name: 🔍 Chequear Pacífico Medio ×2
+      - name: 🔍 Chequear sectores Foo Fighters
         env:
           TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SCRAPERAPI_KEY:   ${{ secrets.SCRAPERAPI_KEY }}
         run: |
           python3 << 'PYEOF'
-          import os, json, re, requests
+          import os, json, re, requests, unicodedata
           from datetime import datetime, timezone, timedelta
 
           TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
           TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
-          URL_EVENTO = "https://www.ticketmaster.cl/event/iron-maiden-run-for-your-lives-scl-2026-venta-general"
+          SCRAPERAPI_KEY   = os.environ.get("SCRAPERAPI_KEY", "")
+          URL_EVENTO = "https://www.ticketmaster.cl/event/foo-fighters-live-2027-scl-venta-general"
+
+          # ── helpers ──────────────────────────────────────────────────────────
 
           def get_html(url):
-              """Intenta descargar el HTML con cloudscraper (bypass Cloudflare), fallback a requests."""
-              # Intento 1: cloudscraper
-              try:
-                  import cloudscraper
-                  scraper = cloudscraper.create_scraper(
-                      browser={"browser": "chrome", "platform": "windows", "mobile": False}
-                  )
-                  resp = scraper.get(url, timeout=30)
-                  print(f"  cloudscraper: status={resp.status_code}, largo={len(resp.text)}")
-                  if resp.status_code == 200 and len(resp.text) > 50000:
-                      return resp.text, resp.status_code
-                  print(f"  cloudscraper insuficiente, intentando requests...")
-              except Exception as e:
-                  print(f"  cloudscraper error: {e}")
-
-              # Intento 2: requests con headers de browser
-              headers = {
-                  "User-Agent": (
-                      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                      "AppleWebKit/537.36 (KHTML, like Gecko) "
-                      "Chrome/124.0.0.0 Safari/537.36"
-                  ),
-                  "Accept-Language": "es-CL,es;q=0.9",
-                  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                  "Accept-Encoding": "gzip, deflate, br",
-                  "Connection": "keep-alive",
-                  "Upgrade-Insecure-Requests": "1",
-              }
-              resp = requests.get(url, headers=headers, timeout=30)
+              if not SCRAPERAPI_KEY:
+                  raise Exception("SCRAPERAPI_KEY no configurada")
+              api_url = f"http://api.scraperapi.com?api_key={SCRAPERAPI_KEY}&url={url}&render=false"
+              resp = requests.get(api_url, timeout=60)
+              print(f"  ScraperAPI: status={resp.status_code}, largo={len(resp.text)}")
               return resp.text, resp.status_code
 
           def send_telegram(msg):
@@ -88,63 +68,85 @@ jobs:
               except Exception as e:
                   print(f"  Telegram error: {e}")
 
+          def normalizar(texto):
+              t = unicodedata.normalize("NFKD", texto.lower())
+              return "".join(c for c in t if not unicodedata.combining(c)).strip()
+
+          def extraer_todos_sectores(html):
+              """
+              Extrae todos los sectores del JSON SSR de Ticketmaster.
+              Retorna lista de dicts: {"name": str, "available": bool, "availability": int, "price": int}
+              """
+              # Buscar el array "sectors":[...] en el HTML
+              idx = html.find('"sectors":')
+              if idx == -1:
+                  return []
+
+              # Buscar el '[' que abre el array
+              inicio_arr = html.find('[', idx)
+              if inicio_arr == -1:
+                  return []
+
+              # Balancear corchetes para extraer el array completo
+              depth = 0
+              for i in range(inicio_arr, len(html)):
+                  c = html[i]
+                  if c == '[':
+                      depth += 1
+                  elif c == ']':
+                      depth -= 1
+                      if depth == 0:
+                          arr_str = html[inicio_arr:i+1]
+                          try:
+                              sectores_raw = json.loads(arr_str)
+                          except json.JSONDecodeError:
+                              return []
+                          break
+              else:
+                  return []
+
+              resultado = []
+              for s in sectores_raw:
+                  nombre = s.get("name", "")
+                  if not nombre:
+                      continue
+                  available = s.get("available", False)
+                  rates = s.get("rates", [])
+                  avail_count = 0
+                  precio = 0
+                  if rates:
+                      avail_count = rates[0].get("availability", 0)
+                      precio = rates[0].get("price", 0)
+
+                  resultado.append({
+                      "name":         nombre,
+                      "available":    available or avail_count > 0,
+                      "availability": avail_count,
+                      "price":        precio,
+                  })
+
+              return resultado
+
           def cargar_estado():
-              if os.path.exists("estado_pm.json"):
+              if os.path.exists("estado_ff.json"):
                   try:
-                      with open("estado_pm.json") as f:
+                      with open("estado_ff.json") as f:
                           return json.load(f)
                   except Exception:
                       pass
               return {}
 
           def guardar_estado(data):
-              with open("estado_pm.json", "w") as f:
-                  json.dump(data, f)
+              with open("estado_ff.json", "w") as f:
+                  json.dump(data, f, ensure_ascii=False, indent=2)
 
-          def extraer_sector(html, nombre_sector):
-              """
-              Extrae el bloque JSON del sector buscado del HTML SSR de Ticketmaster.
-              Retorna dict con availability y max, o None si no encontrado.
-              """
-              # Buscar el campo "name":"<sector>" en el JSON embebido
-              idx = html.find(f'"name":"{nombre_sector}"')
-              if idx == -1:
-                  return None
+          # ── main ─────────────────────────────────────────────────────────────
 
-              # Caminar hacia atrás para encontrar el inicio del objeto del sector {
-              # Buscamos el último '{' antes del "id": que precede al "name"
-              inicio = html.rfind('{', 0, idx)
-              if inicio == -1:
-                  return None
-
-              # Balancear llaves para extraer el objeto JSON completo
-              depth = 0
-              for i in range(inicio, len(html)):
-                  c = html[i]
-                  if c == '{':
-                      depth += 1
-                  elif c == '}':
-                      depth -= 1
-                      if depth == 0:
-                          json_str = html[inicio:i+1]
-                          try:
-                              return json.loads(json_str)
-                          except json.JSONDecodeError:
-                              # Intentar con el siguiente '{'
-                              siguiente = html.find(f'"name":"{nombre_sector}"', idx + 1)
-                              if siguiente != -1:
-                                  inicio2 = html.rfind('{', 0, siguiente)
-                                  if inicio2 != -1 and inicio2 != inicio:
-                                      return extraer_sector_desde(html, nombre_sector, inicio2)
-                              return None
-              return None
-
-          # ══════════════════════════════════════
           ahora_utc = datetime.now(timezone.utc)
           hora_scl  = ahora_utc - timedelta(hours=4)
 
           print("=" * 55)
-          print(f"  Iron Maiden Pacifico Medio x2 — {hora_scl.strftime('%H:%M')} Santiago")
+          print(f"  Foo Fighters — {hora_scl.strftime('%H:%M')} Santiago")
           print("=" * 55)
 
           # PASO 1: Descargar HTML
@@ -154,95 +156,99 @@ jobs:
               print(f"PASO 1: OK — {len(html)} chars (status {status})")
           except Exception as e:
               print(f"PASO 1: ERROR — {e}")
-              guardar_estado({"error": str(e), "ultimo_check": ahora_utc.isoformat()})
               exit(0)
 
-          # Verificar que tenemos contenido real (no una pagina de error/challenge)
           if len(html) < 50000:
-              print(f"PASO 1: ADVERTENCIA — HTML demasiado corto ({len(html)} chars), posible bloqueo")
+              print(f"PASO 1: ADVERTENCIA — HTML corto ({len(html)} chars), posible bloqueo")
               print(f"  Fragmento: {html[:300]}")
-              guardar_estado({"error": "HTML corto (bloqueado)", "largo": len(html), "ultimo_check": ahora_utc.isoformat()})
               exit(0)
 
-          # PASO 2: Buscar sector Pacifico Medio
-          print("PASO 2: Buscando sector Pacifico Medio...")
-          sector = extraer_sector(html, "Pacifico Medio")
+          # PASO 2: Extraer sectores
+          print("PASO 2: Extrayendo sectores...")
+          sectores_ahora = extraer_todos_sectores(html)
 
-          if sector is None:
-              print("PASO 2: Pacifico Medio NO encontrado en el HTML")
-              print("  (puede estar agotado o la pagina cambio)")
-              guardar_estado({
-                  "disponible": False, "dos": False,
-                  "detalle": "No encontrado en HTML",
-                  "ultimo_check": ahora_utc.isoformat()
-              })
-              print("=" * 55)
+          if not sectores_ahora:
+              print("PASO 2: No se encontraron sectores en el HTML")
               exit(0)
 
-          print(f"PASO 2: Sector encontrado!")
-          print(f"  id={sector.get('id')}, available={sector.get('available')}")
+          print(f"PASO 2: {len(sectores_ahora)} sectores encontrados:")
+          for s in sectores_ahora:
+              estado_txt = "DISPONIBLE" if s["available"] else "agotado"
+              precio_fmt = f"${s['price']:,}".replace(",", ".") if s["price"] else "?"
+              print(f"  - {s['name']}: {estado_txt} (availability={s['availability']}, precio={precio_fmt})")
 
-          # PASO 3: Revisar disponibilidad
-          print("PASO 3: Analizando disponibilidad...")
-          availability = 0
-          max_tickets  = 0
-          precio       = 0
-
-          rates = sector.get("rates", [])
-          if rates:
-              rate = rates[0]  # Tomar la primera tarifa (Normal)
-              availability = rate.get("availability", 0)
-              max_tickets  = rate.get("max", 0)
-              precio       = rate.get("price", 0)
-              print(f"  Tarifa: {rate.get('name')} — availability={availability}, max={max_tickets}, price={precio}")
-          else:
-              # Sin rates, verificar campo available del sector
-              disponible_bool = sector.get("available", False)
-              print(f"  Sin rates. available={disponible_bool}")
-              availability = 1 if disponible_bool else 0
-              max_tickets  = 1
-
-          disponible = availability >= 1
-          dos_juntas  = availability >= 2 and max_tickets >= 2
-
-          print(f"  Disponible: {disponible} | Dos juntas: {dos_juntas}")
-
-          # PASO 4: Decidir alerta
+          # PASO 3: Comparar con estado anterior
+          print("PASO 3: Comparando con estado anterior...")
           estado_anterior = cargar_estado()
-          ya_alertado = estado_anterior.get("alertado_dos", False)
 
-          if dos_juntas:
-              precio_fmt = f"${precio:,}".replace(",", ".") if precio else "?"
-              msg = (
-                  f"🔥 <b>IRON MAIDEN — PACÍFICO MEDIO × 2 DISPONIBLES</b>\n\n"
-                  f"Hay <b>{availability} entradas juntas</b> en Pacífico Medio\n"
-                  f"Precio: {precio_fmt} CLP por entrada\n\n"
-                  f"⚡ <b>COMPRA AHORA:</b>\n{URL_EVENTO}\n\n"
-                  f"🕐 {hora_scl.strftime('%H:%M')} Santiago"
-              )
-              if not ya_alertado:
-                  send_telegram(msg)
-                  print("  ALERTA ENVIADA: 2 entradas disponibles!")
-              else:
-                  print("  (ya alertado antes, silencio)")
-          elif disponible:
-              print(f"  Sin alerta — solo {availability} entrada(s) disponible(s) (max={max_tickets}), esperando 2 juntas")
-              if ya_alertado:
-                  # Reset: ya no hay 2, limpiar flag
-                  print("  (reseteando flag alertado)")
+          # Construir mapa nombre_normalizado → sector
+          mapa_ahora = {normalizar(s["name"]): s for s in sectores_ahora}
+          mapa_prev  = {normalizar(k): v for k, v in estado_anterior.get("sectores", {}).items()}
+
+          es_baseline = not bool(mapa_prev)
+
+          if es_baseline:
+              print("PASO 3: Primera corrida — guardando baseline sin alertar")
+              print(f"  Estado inicial: {len(mapa_ahora)} sectores")
           else:
-              print("  Sin alerta — Pacifico Medio agotado")
-              if ya_alertado:
-                  print("  (reseteando flag alertado)")
+              cambios = []
 
+              # Sectores nuevos que no estaban antes
+              for norm, s in mapa_ahora.items():
+                  if norm not in mapa_prev:
+                      cambios.append(f"🆕 Nuevo sector: <b>{s['name']}</b>")
+
+              # Sectores que desaparecieron
+              for norm, s_prev in mapa_prev.items():
+                  if norm not in mapa_ahora:
+                      cambios.append(f"❌ Sector desaparecido: <b>{s_prev['name']}</b>")
+
+              # Sectores que cambiaron de estado (disponible ↔ agotado)
+              for norm, s in mapa_ahora.items():
+                  if norm in mapa_prev:
+                      prev = mapa_prev[norm]
+                      prev_avail = prev.get("available", False)
+                      ahora_avail = s["available"]
+                      if prev_avail != ahora_avail:
+                          if ahora_avail:
+                              precio_fmt = f"${s['price']:,}".replace(",", ".") if s["price"] else "?"
+                              cambios.append(f"✅ <b>{s['name']}</b> → DISPONIBLE ({precio_fmt} CLP)")
+                          else:
+                              cambios.append(f"🔴 <b>{s['name']}</b> → agotado")
+
+              print(f"PASO 3: {len(cambios)} cambio(s) detectado(s)")
+
+              if cambios:
+                  lista_cambios = "\n".join(cambios)
+                  # Resumen del estado actual
+                  disponibles = [s["name"] for s in sectores_ahora if s["available"]]
+                  agotados    = [s["name"] for s in sectores_ahora if not s["available"]]
+                  resumen = f"\nEstado actual:\n✅ Disponibles ({len(disponibles)}): {', '.join(disponibles) or 'ninguno'}\n🔴 Agotados ({len(agotados)}): {', '.join(agotados) or 'ninguno'}"
+
+                  msg = (
+                      f"🤘 <b>FOO FIGHTERS 2027 — CAMBIO DE SECTORES</b>\n\n"
+                      f"{lista_cambios}\n"
+                      f"{resumen}\n\n"
+                      f"⚡ <b>REVISA ACÁ:</b>\n{URL_EVENTO}\n\n"
+                      f"🕐 {hora_scl.strftime('%H:%M')} Santiago"
+                  )
+                  send_telegram(msg)
+                  print("  ALERTA ENVIADA!")
+              else:
+                  print("  Sin cambios — todo igual")
+
+          # PASO 4: Guardar estado actual
           guardar_estado({
-              "disponible":    disponible,
-              "dos":           dos_juntas,
-              "availability":  availability,
-              "max":           max_tickets,
-              "alertado_dos":  dos_juntas and (ya_alertado or dos_juntas),
-              "detalle":       f"availability={availability}, max={max_tickets}",
-              "ultimo_check":  ahora_utc.isoformat(),
+              "sectores": {
+                  s["name"]: {
+                      "name":         s["name"],
+                      "available":    s["available"],
+                      "availability": s["availability"],
+                      "price":        s["price"],
+                  }
+                  for s in sectores_ahora
+              },
+              "ultimo_check": ahora_utc.isoformat(),
           })
           print("=" * 55)
           PYEOF
@@ -251,5 +257,5 @@ jobs:
         uses: actions/cache/save@v4
         if: always()
         with:
-          path: estado_pm.json
-          key: pm-estado-${{ github.run_id }}
+          path: estado_ff.json
+          key: ff-estado-${{ github.run_id }}
