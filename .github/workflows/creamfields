@@ -1,0 +1,221 @@
+name: 🎪 Creamfields — Alerta Disponibilidad
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+
+  workflow_dispatch: {}
+
+jobs:
+  check-creamfields:
+    name: Verificar tickets Creamfields
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+
+    steps:
+      - name: 📂 Restaurar estado previo
+        uses: actions/cache/restore@v4
+        with:
+          path: estado_cf.json
+          key: cf-estado-${{ github.run_id }}
+          restore-keys: cf-estado-
+
+      - name: 🐍 Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 📦 Instalar dependencias
+        run: pip install requests beautifulsoup4 --break-system-packages 2>/dev/null || pip install requests beautifulsoup4
+
+      - name: 🔍 Chequear disponibilidad Creamfields
+        env:
+          TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          PT_COOKIES:       ${{ secrets.PT_COOKIES }}
+        run: |
+          python3 << 'PYEOF'
+          import os, json, requests, re
+          from datetime import datetime, timezone, timedelta
+          from bs4 import BeautifulSoup
+
+          TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
+          TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+          PT_COOKIES       = os.environ.get("PT_COOKIES", "")
+          URL = "https://www.puntoticket.com/Compra/SeleccionAsientos?EventoID=SM0194&CalID=1&CategoriaTicket=2"
+
+          # ── helpers ──────────────────────────────────────────────────────────
+
+          def get_html():
+              headers = {
+                  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
+                  "Cookie": PT_COOKIES,
+                  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                  "Accept-Language": "es-CL,es;q=0.9",
+                  "Referer": "https://www.puntoticket.com/",
+              }
+              resp = requests.get(URL, headers=headers, timeout=30, allow_redirects=True)
+              print(f"  Status: {resp.status_code}, largo: {len(resp.text)} chars")
+              print(f"  URL final: {resp.url}")
+              return resp.text, resp.status_code, resp.url
+
+          def send_telegram(msg):
+              if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+                  print("  sin credenciales Telegram")
+                  return
+              try:
+                  r = requests.post(
+                      f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                      json={"chat_id": TELEGRAM_CHAT_ID, "text": msg,
+                            "parse_mode": "HTML", "disable_web_page_preview": True},
+                      timeout=10)
+                  r.raise_for_status()
+                  print("  Telegram OK")
+              except Exception as e:
+                  print(f"  Telegram error: {e}")
+
+          def cargar_estado():
+              if os.path.exists("estado_cf.json"):
+                  try:
+                      with open("estado_cf.json") as f:
+                          return json.load(f)
+                  except Exception:
+                      pass
+              return {}
+
+          def guardar_estado(data):
+              with open("estado_cf.json", "w") as f:
+                  json.dump(data, f, ensure_ascii=False, indent=2)
+
+          def extraer_tickets(html):
+              """
+              Extrae lista de tickets con nombre, precio y si está agotado.
+              Retorna lista de dicts: {"nombre": str, "precio": str, "agotado": bool}
+              """
+              soup = BeautifulSoup(html, "html.parser")
+              tickets = []
+
+              # Buscar todos los elementos que contienen info de tickets
+              # La estructura es: nombre, precio, AGOTADO (o botón de compra)
+              body_text = soup.get_text(separator="\n")
+              lineas = [l.strip() for l in body_text.splitlines() if l.strip()]
+
+              # Verificar que estamos en la página correcta (no en login)
+              if "INGRESA" in body_text and "Rut" in body_text and "Contraseña" in body_text:
+                  print("  ⚠️  Redirigido al login — cookies expiradas")
+                  return None  # None indica sesión expirada
+
+              # Buscar tickets: patrón "WEEKEND TICKET / ..." seguido de precio
+              i = 0
+              while i < len(lineas):
+                  linea = lineas[i]
+                  # Detectar nombre de ticket (empieza con WEEKEND o similar)
+                  if re.match(r'^(WEEKEND|GENERAL|VIP|TICKET)', linea, re.IGNORECASE):
+                      nombre = linea
+                      precio = ""
+                      agotado = False
+                      # Mirar las siguientes líneas para precio y estado
+                      for j in range(i+1, min(i+5, len(lineas))):
+                          l2 = lineas[j]
+                          if re.match(r'^\$[\d\.]', l2):
+                              precio = l2
+                          elif "AGOTADO" in l2.upper():
+                              agotado = True
+                          elif re.match(r'^(WEEKEND|GENERAL|VIP|TICKET)', l2, re.IGNORECASE):
+                              break  # siguiente ticket
+                      tickets.append({"nombre": nombre, "precio": precio, "agotado": agotado})
+                  i += 1
+
+              return tickets
+
+          # ── main ─────────────────────────────────────────────────────────────
+
+          ahora_utc = datetime.now(timezone.utc)
+          hora_scl  = ahora_utc - timedelta(hours=4)
+
+          print("=" * 55)
+          print(f"  Creamfields — {hora_scl.strftime('%H:%M')} Santiago")
+          print("=" * 55)
+
+          if not PT_COOKIES:
+              print("ERROR: PT_COOKIES no configurado")
+              exit(1)
+
+          # PASO 1: Descargar página
+          print("PASO 1: Descargando pagina...")
+          try:
+              html, status, url_final = get_html()
+          except Exception as e:
+              print(f"PASO 1: ERROR — {e}")
+              exit(0)
+
+          # PASO 2: Extraer tickets
+          print("PASO 2: Extrayendo tickets...")
+          tickets = extraer_tickets(html)
+
+          if tickets is None:
+              print("PASO 2: Cookies expiradas — necesitas renovarlas")
+              send_telegram(
+                  "⚠️ <b>CREAMFIELDS BOT</b>\n\nLas cookies de sesión expiraron.\n"
+                  "Necesitas volver a loguearte y actualizar el secret <code>PT_COOKIES</code> en GitHub."
+              )
+              exit(0)
+
+          if not tickets:
+              print("PASO 2: No se encontraron tickets en la página")
+              print(f"  Fragmento HTML: {html[:500]}")
+              exit(0)
+
+          print(f"PASO 2: {len(tickets)} tickets encontrados:")
+          for t in tickets:
+              estado = "AGOTADO" if t["agotado"] else "✅ DISPONIBLE"
+              print(f"  - {t['nombre']} {t['precio']}: {estado}")
+
+          # PASO 3: Comparar con estado anterior
+          estado_anterior = cargar_estado()
+          mapa_prev = {t["nombre"]: t for t in estado_anterior.get("tickets", [])}
+          es_baseline = not bool(mapa_prev)
+
+          if es_baseline:
+              print("PASO 3: Primera corrida — guardando baseline")
+          else:
+              cambios = []
+              for t in tickets:
+                  nombre = t["nombre"]
+                  prev = mapa_prev.get(nombre)
+                  if prev is None:
+                      cambios.append(f"🆕 Nuevo: <b>{nombre}</b> {t['precio']}")
+                  elif prev["agotado"] and not t["agotado"]:
+                      cambios.append(f"✅ <b>{nombre}</b> {t['precio']} → DISPONIBLE")
+                  elif not prev["agotado"] and t["agotado"]:
+                      cambios.append(f"🔴 <b>{nombre}</b> → agotado")
+
+              if cambios:
+                  disponibles = [t for t in tickets if not t["agotado"]]
+                  lista_disp = "\n".join(f"  ✅ {t['nombre']} {t['precio']}" for t in disponibles) or "  (ninguno)"
+                  msg = (
+                      f"🎪 <b>CREAMFIELDS 2026 — CAMBIO DE TICKETS</b>\n\n"
+                      + "\n".join(cambios)
+                      + f"\n\n<b>Disponibles ahora:</b>\n{lista_disp}\n\n"
+                      f"⚡ <b>COMPRA ACÁ:</b>\n{URL}\n\n"
+                      f"🕐 {hora_scl.strftime('%H:%M')} Santiago"
+                  )
+                  send_telegram(msg)
+                  print("  ALERTA ENVIADA!")
+              else:
+                  print("PASO 3: Sin cambios")
+
+          # PASO 4: Guardar estado
+          guardar_estado({
+              "tickets": tickets,
+              "ultimo_check": ahora_utc.isoformat(),
+          })
+          print("=" * 55)
+          PYEOF
+
+      - name: 💾 Guardar estado
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: estado_cf.json
+          key: cf-estado-${{ github.run_id }}
